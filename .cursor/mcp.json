@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zero-chatgpt": {
+      "command": "node",
+      "args": ["src/mcp-server.js"]
+    }
+  }
+}

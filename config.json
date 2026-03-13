@@ -1,0 +1,58 @@
+{
+  "server": {
+    "agentTimeoutMs": 15000,
+    "chatTimeoutMs": 90000,
+    "healthCheckIntervalMs": 30000
+  },
+  "llm": {
+    "provider": "chatgpt-web",
+    "cdp": {
+      "url": "http://127.0.0.1:9222",
+      "chatgptUrl": "https://chatgpt.com/",
+      "chromePath": "",
+      "authTimeoutMs": 120000,
+      "replyPollIntervalMs": 500,
+      "replyPollTimeoutMs": 120000
+    }
+  },
+  "execution": {
+    "allowedRoots": ["D:/Workspace", "D:/Projects", "D:/Other", "C:/Users", "."],
+    "appMap": {
+      "notepad": "C:/Windows/System32/notepad.exe",
+      "unity_hub": "C:/Program Files/Unity Hub/Unity Hub.exe"
+    },
+    "commandWhitelist": ["dir", "type", "echo", "where", "ipconfig", "tasklist", "start"],
+    "autoApprove": true
+  },
+  "tools": [
+    {
+      "name": "run_command",
+      "description": "执行系统命令（如 ls、dir、pwd、echo 等），返回 stdout 和 stderr",
+      "parameters": {
+        "command": "要执行的命令字符串"
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "读取文件内容",
+      "parameters": {
+        "path": "文件路径"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "写入内容到文件",
+      "parameters": {
+        "path": "文件路径",
+        "content": "要写入的内容"
+      }
+    },
+    {
+      "name": "list_dir",
+      "description": "列出目录下的文件和子目录",
+      "parameters": {
+        "path": "目录路径，默认为当前目录"
+      }
+    }
+  ]
+}

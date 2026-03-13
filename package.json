@@ -1,0 +1,35 @@
+{
+  "name": "zero-chatgpt",
+  "version": "1.0.0",
+  "description": "Zero-token ChatGPT Web via Chrome CDP - 通过 Chrome Debug 调用网页版聊天",
+  "type": "module",
+  "main": "src/agent.js",
+  "scripts": {
+    "start": "node src/agent.js",
+    "api": "node src/api-server.js",
+    "test-api": "curl -s http://127.0.0.1:3000/v1/models",
+    "ngrok": "powershell -ExecutionPolicy Bypass -File scripts/ngrok.ps1",
+    "run": "powershell -ExecutionPolicy Bypass -File scripts/run.ps1",
+    "chrome": "powershell -ExecutionPolicy Bypass -File scripts/launch-chrome.ps1",
+    "check": "powershell -ExecutionPolicy Bypass -File scripts/check-cdp.ps1",
+    "auth": "node src/chatgpt-web-client.js auth",
+    "chat": "node src/chatgpt-web-client.js chat",
+    "mcp": "node src/mcp-server.js",
+    "test": "node test-agent-flow.mjs",
+    "test:e2e": "node test-agent-flow.mjs --e2e"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "express": "^4.21.2",
+    "puppeteer-core": "^23.0.0",
+    "zod": "^4.3.6"
+  },
+  "keywords": [
+    "chatgpt",
+    "cdp",
+    "chrome-debug",
+    "zero-token"
+  ],
+  "author": "",
+  "license": "MIT"
+}

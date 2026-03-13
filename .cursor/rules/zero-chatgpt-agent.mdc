@@ -1,0 +1,30 @@
+---
+description: ZeroChatgpt MCP 工具调用规则 - 防止 Agent 循环
+alwaysApply: true
+---
+
+# ZeroChatgpt Agent 工具链规则
+
+## ask_chatgpt 工具使用
+
+当需要调用 ChatGPT 时：
+
+1. **单次调用**：每个用户请求最多调用 `ask_chatgpt` **一次**
+2. **完整问题**：将用户问题完整放入 `message` 参数，不要拆分
+3. **直接返回**：收到工具返回后，立即将结果呈现给用户，**不要再次调用**
+4. **流程**：用户提问 → 调用 ask_chatgpt(message) → 获得结果 → 回复用户 → 结束
+
+## 禁止行为
+
+- 不要重复调用 ask_chatgpt
+- 不要在同一轮对话中多次调用
+- 不要在获得结果后再次请求
+
+## 示例
+
+```text
+用户: 用 ChatGPT 解释一下这段代码
+
+正确: 调用 ask_chatgpt("解释这段代码: [代码内容]") → 获得回复 → 呈现给用户
+错误: 调用 ask_chatgpt → 再调用 → 再调用 → 循环
+```
