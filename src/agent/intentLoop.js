@@ -32,13 +32,22 @@ function tryParseJSON(raw) {
     return JSON.parse(raw);
   } catch (_) {}
 
-  const repaired = raw
+  let repaired = raw
     .replace(/"command"\s*:\s*"powershell([^"]*?) -Command "([^"]*?)""/g, (_, a, b) =>
       `"command":"powershell${a} -Command \\"${b}\\""`
     )
     .replace(/"command"\s*:\s*"tasklist \/FI "([^"]*?)""/g, (_, a) =>
       `"command":"tasklist /FI \\"${a}\\""`
     );
+
+  // 修复 command 中未转义的反斜杠（如注册表路径 HKEY_LOCAL_MACHINE\SOFTWARE）
+  repaired = repaired.replace(
+    /"command"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
+    (match, content) => {
+      const fixed = content.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
+      return `"command":"${fixed}"`;
+    }
+  );
 
   try {
     return JSON.parse(repaired);
@@ -106,6 +115,44 @@ async function executeTool(toolName, args) {
   return { ok: !out.error, result: out.result, error: out.error };
 }
 
+let lastErrorFeedback = null;
+
+function generateErrorDetails(error, context = {}) {
+  const msg = error?.message ?? String(error ?? '');
+  let suggestion = '检查命令中的引号是否转义、路径反斜杠是否转义为 \\\\，或尝试 fallback 中的替代命令。';
+  if (msg.includes('权限') || msg.includes('Access') || msg.includes('拒绝')) {
+    suggestion = '该操作可能需要管理员权限，或使用无需提权的替代命令。';
+  } else if (msg.includes('JSON') || msg.includes('parse') || msg.includes('格式')) {
+    suggestion = '检查 JSON 格式：command 内双引号转义为 \\"，路径反斜杠转义为 \\\\。';
+  }
+  return {
+    message: msg,
+    type: error?.name ?? 'Error',
+    suggestion,
+    ...context,
+  };
+}
+
+function sendErrorFeedbackToAI(errorDetails) {
+  lastErrorFeedback = errorDetails;
+  console.log(`[ErrorFeedback] 错误反馈: ${JSON.stringify(errorDetails, null, 2)}`);
+}
+
+async function executeWithErrorFeedback(action) {
+  try {
+    const result = await executeTool(action.tool, action.args);
+    if (!result.ok) throw new Error(result.error);
+    return result;
+  } catch (error) {
+    const errorDetails = generateErrorDetails(error, { tool: action.tool, args: action.args });
+    sendErrorFeedbackToAI(errorDetails);
+    return {
+      ok: false,
+      error: errorDetails.message,
+    };
+  }
+}
+
 async function executeWithErrorHandling(action) {
   try {
     const result = await executeTool(action.tool, action.args);
@@ -119,7 +166,7 @@ async function executeWithErrorHandling(action) {
 async function requestPermissionForAction(action) {
   const confirmed = await askUserConfirm('该操作需要管理员权限，是否同意授权？');
   if (confirmed) {
-    return await executeWithErrorHandling(action);
+    return await executeWithErrorFeedback(action);
   }
   return { ok: false, error: '用户拒绝授权，操作无法执行。' };
 }
@@ -136,7 +183,7 @@ async function handleExecutionError(error, action) {
   }
   const alternativeAction = getAlternativeAction(action);
   if (alternativeAction) {
-    const out = await executeWithErrorHandling(alternativeAction);
+    const out = await executeWithErrorFeedback(alternativeAction);
     return out.ok ? { ...out, usedFallback: true } : out;
   }
   return { ok: false, error: errStr };
@@ -161,6 +208,12 @@ async function executeWithFallback(action) {
   }
 
   const errStr = errors.filter(Boolean).join(' | ').slice(0, 500);
+  const errorDetails = generateErrorDetails(new Error(errStr), {
+    tool: action.tool,
+    args: action.args,
+    suggestion: '所有 fallback 均已失败。请检查命令格式（引号、反斜杠转义），或提供其他替代方案。',
+  });
+  sendErrorFeedbackToAI(errorDetails);
   return { ok: false, error: `All fallbacks exhausted for ${action.tool}: ${errStr}` };
 }
 
@@ -197,8 +250,9 @@ Windows 命令规则：
    notepad, calc, tasklist, dir, winget, start
 2. 仅当需要 PowerShell 专属语法时，才显式调用：
    powershell -NoProfile -ExecutionPolicy Bypass -Command "..."
-3. 主 action、fallback、verify 中的所有 command 字符串都必须符合 JSON 语法；
-   如果包含双引号，必须转义为 \\"
+3. 主 action、fallback、verify 中的所有 command 字符串都必须符合 JSON 语法：
+   - 双引号必须转义为 \\"
+   - 路径中的反斜杠必须转义为 \\\\（如注册表路径 HKEY_LOCAL_MACHINE\\\\SOFTWARE\\\\...）
 4. 不要直接输出裸 PowerShell 命令，例如：
    Get-WmiObject、Get-ChildItem、Get-Content、$env:...
 5. 查询已安装软件时，不要优先使用：
@@ -236,6 +290,12 @@ write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, 
 
 正确示例：
 "command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
+
+错误示例（注册表路径反斜杠未转义）：
+"command": "reg query HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft..."
+
+正确示例：
+"command": "reg query HKEY_LOCAL_MACHINE\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\*"
 
 ${extraHint}
 `.trim();
@@ -397,13 +457,20 @@ async function runMultiAgentLoop(userGoal, baseChatOpts, options) {
 
     if (verdict?.next) {
       console.log('[Retry] Extractor 重试...');
+      const errorHint = [
+        `上次失败：${verdict.reason}`,
+        `建议：${verdict.next}`,
+        lastErrorFeedback
+          ? `\n执行错误详情（请据此修正 JSON）：\n${JSON.stringify(lastErrorFeedback, null, 2)}`
+          : '',
+        '请重新提取 JSON，并继续遵守上述规则。',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      lastErrorFeedback = null;
       const retryRes = await callAgent(
         'extractor',
-        buildExtractorPrompt(
-          userGoal,
-          thinkText,
-          `上次失败：${verdict.reason}\n建议：${verdict.next}\n请重新提取 JSON，并继续遵守上述规则。`
-        ),
+        buildExtractorPrompt(userGoal, thinkText, errorHint),
         baseChatOpts,
         false
       );
@@ -450,6 +517,7 @@ async function runMultiAgentLoop(userGoal, baseChatOpts, options) {
     }
     throw e;
   } finally {
+    lastErrorFeedback = null;
     initializedAgents.clear();
     await chatgptWeb.closeAllAgents();
     await chatgptWeb.disconnectBrowser();
