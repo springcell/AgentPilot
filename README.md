@@ -1,6 +1,6 @@
 # AgentPilot
 
-用 ChatGPT 网页版驱动本地 AI Agent，无需 API Key。
+用 ChatGPT 网页版驱动本地对话，无需 API Key。纯对话模式。
 
 ## 环境部署
 
@@ -30,15 +30,13 @@ npm run chrome
 
 | 命令 | 说明 |
 |------|------|
-| `npm start` | 启动 Agent。无参数时启动 HTTP 服务（3000 端口）；带参数时执行单次任务 |
+| `npm start` | 启动服务。无参数时启动 HTTP（3000 端口）；带参数时执行单次对话 |
 | `npm run chrome` | 启动 Chrome 调试模式，用于连接 ChatGPT 网页 |
 | `npm run api` | 仅启动 API 服务 |
 | `npm run run` | 一键运行（自动检测并启动 Chrome） |
 | `npm run check` | 检查 CDP 连接是否正常 |
 | `npm run auth` | 认证并缓存 cookie |
 | `npm run ngrok` | 启动 ngrok 隧道（用于 Cursor 公网接入） |
-| `npm run test` | 运行 Agent 流程测试 |
-| `npm run test:e2e` | 运行 E2E 测试 |
 | `npm run debug` | 调试模式运行 |
 | `npm run chat` | 纯对话模式（不执行工具） |
 | `npm run mcp` | 单独启动 MCP 服务 |
@@ -46,29 +44,36 @@ npm run chrome
 ### 使用示例
 
 ```bash
-# 单次任务
-npm start 查看 D:\Projects 目录下的文件
+# 单次对话
+npm start 你好，请介绍一下你自己
 
 # 交互模式（持续对话）
 npm start
 
 # 带参数的一键运行
-npm run run -- 你好，请介绍一下你自己
+npm run run -- 你好
 ```
 
----
+## AI 智能体执行器
+
+`agent/` 目录包含 Windows AI 智能体，通过网页桥驱动 ChatGPT 规划并本地执行任务，无需 API Key。
+
+```powershell
+# 1. 启动 Chrome 并登录 chatgpt.com
+npm run chrome
+
+# 2. 运行智能体（自动启动桥接 API）
+npm run agent
+npm run agent "帮我找今天10条新闻放在桌面"
+```
+
+详见 [agent/README.md](agent/README.md)。
 
 ## 计划
 
-以下功能与文档待完善：
-
-- [ ] 核心能力说明（零 Token、多 Agent、本地工具、安全防护）
-- [ ] 工作模式说明（intent / verify / single）
-- [ ] HTTP API 文档（/chat、/agent、/tools/invoke）
-- [ ] Cursor 接入（MCP 工具、API 替换主模型、mcp.json 配置）
-- [ ] 内置工具列表与参数说明
+- [ ] HTTP API 文档（/chat、/v1/chat/completions）
+- [ ] Cursor 接入说明
 - [ ] config.json 配置说明
-- [ ] 故障排查指南
 
 ## License
 

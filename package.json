@@ -1,13 +1,14 @@
 {
-  "name": "zero-chatgpt",
+  "name": "agent-pilot",
   "version": "1.0.0",
-  "description": "Zero-token ChatGPT Web via Chrome CDP - 通过 Chrome Debug 调用网页版聊天",
+  "description": "AgentPilot - ChatGPT Web via Chrome CDP，无需 API Key",
   "type": "module",
   "main": "src/agent.js",
   "scripts": {
     "start": "node src/agent.js",
     "debug": "node scripts/debug-runner.mjs",
     "api": "node src/api-server.js",
+    "api:stop": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-3000.ps1",
     "test-api": "curl -s http://127.0.0.1:3000/v1/models",
     "ngrok": "powershell -ExecutionPolicy Bypass -File scripts/ngrok.ps1",
     "run": "powershell -ExecutionPolicy Bypass -File scripts/run.ps1",
@@ -16,8 +17,8 @@
     "auth": "node src/chatgpt-web-client.js auth",
     "chat": "node src/chatgpt-web-client.js chat",
     "mcp": "node src/mcp-server.js",
-    "test": "node test-agent-flow.mjs",
-    "test:e2e": "node test-agent-flow.mjs --e2e"
+    "agent": "powershell -ExecutionPolicy Bypass -File scripts/run-agent.ps1",
+    "agent:raw": "python agent/agent_loop.py"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

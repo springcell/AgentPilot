@@ -1,0 +1,7 @@
+{
+  "command": "powershell",
+  "arguments": [
+    "$content = '1. US strikes more than 90 Iranian military targets on Kharg Island, Iran vows retaliation. :contentReference[oaicite:0]{index=0}\n2. Opinion: US-Iran conflict wakes up Philippines and Vietnam to US policy. :contentReference[oaicite:1]{index=1}\n3. Analysis of Iranian political factions amid US-Iran tensions. :contentReference[oaicite:2]{index=2}\n4. Iranian military warns destruction of oil/energy infrastructure tied to US cooperation. :contentReference[oaicite:3]{index=3}\n5. US offers $10M reward for info on 10 Iranian leaders. :contentReference[oaicite:4]{index=4}\n6. Trump says US destroyed military targets on Kharg Island, warns further action. :contentReference[oaicite:5]{index=5}\n7. US Defense Secretary orders probe of alleged US-caused school strike in Iran. :contentReference[oaicite:6]{index=6}\n8. Latest: Trump confirms Kharg strikes, Iran retaliation and more US Marines deployed. :contentReference[oaicite:7]{index=7}\n9. Trump bombs over 90 targets on Iran oil island; Tehran threats escalate. :contentReference[oaicite:8]{index=8}\n10. US strikes Iranian targets on Kharg Island; additional troops and warships sent. :contentReference[oaicite:9]{index=9}' ;",
+    "Set-Content -Path \"$env:USERPROFILE\\Desktop\\us_iran_news.txt\" -Value $content"
+  ]
+}

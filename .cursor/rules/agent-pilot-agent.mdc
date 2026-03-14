@@ -1,9 +1,9 @@
 ---
-description: ZeroChatgpt MCP 工具调用规则 - 防止 Agent 循环
+description: AgentPilot MCP 工具调用规则 - 防止 Agent 循环
 alwaysApply: true
 ---
 
-# ZeroChatgpt Agent 工具链规则
+# AgentPilot Agent 工具链规则
 
 ## ask_chatgpt 工具使用
 

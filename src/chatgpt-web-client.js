@@ -159,7 +159,7 @@ function loadAuth() {
   try {
     return JSON.parse(fs.readFileSync(AUTH_CACHE_PATH, 'utf-8'));
   } catch (e) {
-    console.warn('[auth] 缓存文件损坏，忽略:', e.message);
+    console.warn('[auth] Cache corrupted, ignore:', e.message);
     return null;
   }
 }
@@ -282,9 +282,9 @@ async function doChat(message, options = {}) {
     await disconnectBrowser();
     throw new Error(
       `CF_BLOCKED:Edge IP Restricted (1034)\n` +
-      `IP: ${cfCheck.ip} 被 Cloudflare 限制访问 chatgpt.com\n` +
+      `IP: ${cfCheck.ip} blocked by Cloudflare for chatgpt.com\n` +
       `Ray ID: ${cfCheck.rayId}\n` +
-      `解决方法：更换网络/代理，或等待 IP 解封`
+      `Fix: Change network/proxy or wait for unblock`
     );
   }
 
@@ -344,10 +344,19 @@ async function doChat(message, options = {}) {
   const prevCount = await getReplyCount(page);
   await page.click(sendSelector);
 
+  // ── 中间状态模式：匹配时永不提前返回 ──────────────────────
+  const _INTER_RE = [
+    /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
+    /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
+  ];
+  const _isIntermediate = (t) => !t || t.trim().length < 15 || _INTER_RE.some(r => r.test(t));
+
   const start = Date.now();
   let lastText = '';
   let stableCount = 0;
   const STABLE_POLLS = 4;
+  // 短回复（如占位符）需更多轮稳定，避免在完整 JSON 渲染前提前返回
+  const MIN_LEN_FOR_QUICK_STABLE = 150;
 
   while (Date.now() - start < pollTimeoutMs) {
     await new Promise(r => setTimeout(r, pollIntervalMs));
@@ -356,9 +365,9 @@ async function doChat(message, options = {}) {
       await disconnectBrowser();
       throw new Error(
         `CF_BLOCKED:Edge IP Restricted (1034)\n` +
-        `IP: ${cfCheck.ip} 被 Cloudflare 限制访问 chatgpt.com\n` +
+        `IP: ${cfCheck.ip} blocked by Cloudflare for chatgpt.com\n` +
         `Ray ID: ${cfCheck.rayId}\n` +
-        `解决方法：更换网络/代理，或等待 IP 解封`
+        `Fix: Change network/proxy or wait for unblock`
       );
     }
     const count = await getReplyCount(page);
@@ -370,7 +379,15 @@ async function doChat(message, options = {}) {
 
     if (text === lastText) {
       stableCount++;
-      if (stableCount >= STABLE_POLLS) {
+      const requiredStable = (text.length < MIN_LEN_FOR_QUICK_STABLE && !text.includes('"command"'))
+        ? 10  // 短回复且无 JSON 特征时多等几轮，避免占位符被误判为完成
+        : STABLE_POLLS;
+      if (stableCount >= requiredStable) {
+        // ── 关键修复：中间状态时重置计数，继续等待真实回复 ──
+        if (_isIntermediate(text)) {
+          stableCount = 0;
+          continue;
+        }
         return { text, raw: text };
       }
     } else {
@@ -425,14 +442,25 @@ async function getLastReplyText(page) {
       (t.includes('<tool>') && !t.includes('?') && t.length < 500) ||
       (t.includes('<available_tools>') && t.length < 300);
 
+    const isScriptLike = (t) =>
+      !t ||
+      t.includes('window.__') ||
+      t.includes('requestAnimationFrame') ||
+      (t.includes('Date.now()') && t.length < 200) ||
+      (t.includes('?.') && t.includes('()') && !t.includes('{') && t.length < 300) ||
+      /^[a-zA-Z_$][a-zA-Z0-9_$]*\s*[?=\(]/.test(t.slice(0, 80));
+
+    const isValidReply = (t) => t && t.length > 3 && !isPromptLike(t) && !isScriptLike(t);
+
     // 策略 1: 取最后一条 assistant 消息
     let els = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (els.length > 0) {
       for (let i = els.length - 1; i >= 0; i--) {
         const t = getText(els[i]);
-        if (t && !isPromptLike(t) && t.length > 3) return t;
+        if (isValidReply(t)) return t;
       }
-      return getText(els[els.length - 1]) || '';
+      const last = getText(els[els.length - 1]);
+      return isScriptLike(last) ? '' : last || '';
     }
 
     // 策略 2: conversation-turn
@@ -442,7 +470,7 @@ async function getLastReplyText(page) {
         const el = els[i];
         if (el.querySelector('[data-message-author-role="user"]')) continue;
         const t = getText(el);
-        if (t && !isPromptLike(t) && t.length > 3) return t;
+        if (isValidReply(t)) return t;
       }
     }
 
@@ -451,16 +479,17 @@ async function getLastReplyText(page) {
     const all = main.querySelectorAll('div[class*="markdown"], div[class*="prose"], article');
     for (let i = all.length - 1; i >= 0; i--) {
       const t = getText(all[i]);
-      if (t && !isPromptLike(t) && t.length > 5) return t;
+      if (isValidReply(t)) return t;
     }
-    return all.length ? getText(all[all.length - 1]) || '' : '';
+    const fallback = all.length ? getText(all[all.length - 1]) || '' : '';
+    return isScriptLike(fallback) ? '' : fallback;
   });
 }
 
 // CLI 入口
 const args = process.argv.slice(2);
 if (args[0] === 'auth') {
-  auth().then(d => console.log('认证成功:', Object.keys(d))).catch(e => { console.error(e); process.exit(1); });
+  auth().then(d => console.log('Auth OK:', Object.keys(d))).catch(e => { console.error(e); process.exit(1); });
 } else if (args[0] === 'chat') {
   const msg = args.slice(1).join(' ') || 'Hello';
   chat(msg).then(r => console.log(r.text)).catch(e => { console.error(e); process.exit(1); });

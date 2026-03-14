@@ -21,7 +21,7 @@ function loadConfig() {
 }
 
 const server = new McpServer({
-  name: 'zero-chatgpt',
+  name: 'agent-pilot',
   version: '1.0.0',
 });
 

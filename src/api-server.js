@@ -1,13 +1,12 @@
 /**
  * OpenAI-compatible API server for Cursor
  * Exposes /v1/chat/completions - forwards to ChatGPT Web (CDP)
- * Exposes POST /tools/invoke - direct tool execution (OpenClaw-style)
  */
 
 import http from 'http';
 import * as chatgptWeb from './chatgpt-web-client.js';
 import * as xmlTools from './xml-tools.js';
-import { processLlmOutput } from './router.js';
+import bridge from './bridge.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -20,32 +19,26 @@ function loadConfig() {
   return JSON.parse(raw);
 }
 
-/** OpenClaw 工具名 -> ZeroChatgpt 工具名 */
-const TOOL_NAME_MAP = { bash: 'run_command', exec: 'run_command' };
+// ── agent_loop.py 轮询缓存 ──────────────────────────────
+// key: agentId (默认 "default")
+// value: { text, generating, updatedAt }
+const _replyCache = {};
 
-/** POST /tools/invoke - 走 router 工具链 */
-async function handleToolsInvoke(body) {
-  let toolName = typeof body?.tool === 'string' ? body.tool.trim() : '';
-  if (!toolName) {
-    return { ok: false, error: { type: 'invalid_request', message: 'body.tool is required' }, status: 400 };
-  }
-  toolName = TOOL_NAME_MAP[toolName.toLowerCase()] ?? toolName;
-  const args = body?.args && typeof body.args === 'object' && !Array.isArray(body.args)
-    ? body.args
-    : {};
+// 用 search 而非 ^ 匹配，兼容 "ChatGPT 说： 正在搜索网页" 等前缀变体
+const _INTERMEDIATE_RE = [
+  /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
+  /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
+];
 
-  const llm_output = `<tool>\nname: ${toolName}\nargs: ${JSON.stringify(args)}\n</tool>`;
-  const out = await processLlmOutput(llm_output);
-
-  if (out.error) {
-    return {
-      ok: false,
-      error: { type: 'tool_error', message: out.error },
-      status: 500,
-    };
-  }
-  return { ok: true, result: out.result };
+function _isIntermediate(text) {
+  if (!text) return true;
+  if (text.includes('✅ 任务完成') || text.includes('任务完成：')) return false;  // 任务完成 → 最高优先级
+  if (text.trim().length < 20) return true;
+  // 去掉 "ChatGPT 说：" 等前缀再匹配（与 agent_loop 一致）
+  const cleaned = text.trim().replace(/^[\s\S]{0,30}?ChatGPT\s*[^\n]*[：:]\s*/i, '').trim();
+  return _INTERMEDIATE_RE.some(r => r.test(cleaned));
 }
+// ──────────────────────────────────────────────────────
 
 function getContentFromItem(item) {
   if (typeof item.content === 'string') return item.content;
@@ -115,10 +108,10 @@ async function handleChatCompletions(body) {
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: model,
-      choices: [{ index: 0, message: { role: 'assistant', content: 'Hello! ZeroChatgpt ready.' }, finish_reason: 'stop' }],
+      choices: [{ index: 0, message: { role: 'assistant', content: 'Hello! AgentPilot ready.' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 1, completion_tokens: 5, total_tokens: 6 },
     };
-    return { data, stream, id: data.id, content: 'Hello! ZeroChatgpt ready.' };
+    return { data, stream, id: data.id, content: 'Hello! AgentPilot ready.' };
   }
 
   try {
@@ -168,9 +161,10 @@ async function handleChatCompletions(body) {
 
 function getPathname(url) {
   try {
-    return new URL(url || '/', 'http://localhost').pathname;
+    let p = new URL(url || '/', 'http://localhost').pathname;
+    return p.replace(/\/+$/, '') || '/';  // 去除尾部斜杠，避免 /chat/ 导致 404
   } catch (_) {
-    return (url || '/').split('?')[0];
+    return ((url || '/').split('?')[0]).replace(/\/+$/, '') || '/';
   }
 }
 
@@ -185,20 +179,6 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
-    return;
-  }
-
-  if (req.method === 'GET' && pathname === '/tools-demo') {
-    const demoPath = path.join(__dirname, '..', 'public', 'tools-demo.html');
-    try {
-      const html = fs.readFileSync(demoPath, 'utf-8');
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.writeHead(200);
-      res.end(html);
-    } catch (_) {
-      res.writeHead(404);
-      res.end('Not found');
-    }
     return;
   }
 
@@ -272,7 +252,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/tools/invoke') {
+  if (req.method === 'POST' && (pathname === '/chat' || pathname === '/v1/chat')) {
     let body = '';
     for await (const chunk of req) body += chunk;
     let parsed;
@@ -280,17 +260,131 @@ const server = http.createServer(async (req, res) => {
       parsed = body ? JSON.parse(body) : {};
     } catch (_) {
       res.writeHead(400);
-      res.end(JSON.stringify({ ok: false, error: { type: 'invalid_json', message: 'Invalid JSON body' } }));
+      res.end(JSON.stringify({ error: { message: 'Invalid JSON' } }));
       return;
     }
-    const result = await handleToolsInvoke(parsed);
-    if (result.error) {
-      res.writeHead(result.status || 500);
-      res.end(JSON.stringify({ ok: result.ok ?? false, error: result.error }));
+    const { message, newChat, agentId = 'default' } = parsed;
+    if (!message?.trim()) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: { message: 'message is required' } }));
       return;
     }
-    res.writeHead(200);
-    res.end(JSON.stringify({ ok: true, result: result.result }));
+    _replyCache[agentId] = { text: '', generating: true, updatedAt: Date.now() };
+    try {
+      const result = await bridge.chat(message, { newChat: !!newChat });
+      const text = result?.result ?? '';
+      const intermediate = _isIntermediate(text);
+      // 中间状态时保持 generating:true，agent_loop /poll 继续等待 DOM 更新
+      _replyCache[agentId] = { text, generating: intermediate, updatedAt: Date.now() };
+      if (intermediate) {
+        console.warn(`  [poll] ⚠️ agentId=${agentId} 中间状态(len=${text.length})，keeping generating:true`);
+        console.warn(`  [poll]    "${text.slice(0, 60).replace(/\n/g, ' ')}"`);
+        // 后台持续读 DOM，直到拿到真实回复后更新缓存
+        _pollDomUntilFinal(agentId).catch(e =>
+          console.error('  [poll] DOM轮询出错:', e.message)
+        );
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      _replyCache[agentId] = { text: '', generating: false, updatedAt: Date.now() };
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+// ── 后台 DOM 轮询：bridge 返回中间状态后持续读页面，直到拿到真实回复 ──────
+// chatgpt-web-client 没有暴露纯读接口，改用 puppeteer 直接读已有 page
+async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
+  const config = loadConfig();
+  const cdp = config?.llm?.cdp ?? {};
+  const cdpUrl = cdp.url ?? 'http://127.0.0.1:9222';
+  const POLL_MS = 1500;
+  const deadline = Date.now() + maxMs;
+
+  // 动态 import puppeteer（避免循环依赖）
+  let puppeteer;
+  try {
+    puppeteer = (await import('puppeteer-core')).default;
+  } catch (e) {
+    console.error('  [DOM轮询] puppeteer-core 不可用:', e.message);
+    if (_replyCache[agentId]) _replyCache[agentId].generating = false;
+    return;
+  }
+
+  let browser;
+  try {
+    browser = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+  } catch (e) {
+    console.error('  [DOM轮询] 无法连接 CDP:', e.message);
+    if (_replyCache[agentId]) _replyCache[agentId].generating = false;
+    return;
+  }
+
+  console.log(`  [DOM轮询] 启动 agentId=${agentId}，最长等待 ${maxMs/1000}s`);
+
+  try {
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+
+      const pages = await browser.pages();
+      const chatPages = pages.filter(p => p.url().includes('chatgpt.com'));
+      if (!chatPages.length) continue;
+      // 优先选有 stop-button 的（正在生成）或内容最长的，确保读到当前对话
+      let page = chatPages.find(p => true);
+      for (const p of chatPages) {
+        try {
+          const hasStop = await p.evaluate(() => !!document.querySelector('[data-testid="stop-button"]'));
+          if (hasStop) { page = p; break; }
+        } catch (_) {}
+      }
+      try { await page.bringToFront(); } catch (_) {}
+
+      const text = await page.evaluate(() => {
+        const els = document.querySelectorAll('[data-message-author-role="assistant"]');
+        if (!els.length) return '';
+        return (els[els.length - 1]?.innerText || '').trim();
+      }).catch(() => '');
+
+      if (!text) continue;
+
+      // 检查是否还在生成（发送按钮可见说明已停止）
+      const stillGenerating = await page.evaluate(() =>
+        !!document.querySelector('[data-testid="stop-button"]')
+      ).catch(() => false);
+
+      console.log(`  [DOM轮询] generating=${stillGenerating} len=${text.length}: ${text.slice(0,60).replace(/\n/g,' ')}`);
+
+      if (!stillGenerating && !_isIntermediate(text)) {
+        _replyCache[agentId] = { text, generating: false, updatedAt: Date.now() };
+        console.log(`  [DOM轮询] ✅ agentId=${agentId} 拿到真实回复 len=${text.length}`);
+        return;
+      }
+
+      // 更新缓存中的文本（让 agent_loop 能看到最新进度）
+      if (_replyCache[agentId]) {
+        _replyCache[agentId].text = text;
+        _replyCache[agentId].updatedAt = Date.now();
+      }
+    }
+  } finally {
+    await browser.disconnect().catch(() => {});
+  }
+
+  // 超时：强制解锁
+  if (_replyCache[agentId]) {
+    _replyCache[agentId].generating = false;
+    console.warn(`  [DOM轮询] ⏰ agentId=${agentId} 超时，强制 generating=false`);
+  }
+}
+
+  // GET /poll?agentId=default  —  agent_loop.py 轮询最新回复
+  if (req.method === 'GET' && pathname === '/poll') {
+    const agentId = new URL(req.url, 'http://localhost').searchParams.get('agentId') ?? 'default';
+    const cached = _replyCache[agentId] ?? { text: '', generating: false, updatedAt: 0 };
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, ...cached }));
     return;
   }
 
@@ -300,10 +394,20 @@ const server = http.createServer(async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '127.0.0.1', () => {
-  console.log('ZeroChatgpt API: http://127.0.0.1:' + PORT);
+  console.log('AgentPilot API: http://127.0.0.1:' + PORT);
+  console.log('  POST /chat - 智能体对话 (agent_loop.py)');
   console.log('');
   console.log('Cursor: Base URL must be PUBLIC (Cursor routes via api2.cursor.sh)');
   console.log('  Run: npm run ngrok');
   console.log('  Then set Base URL = https://YOUR-NGROK-URL/v1');
   console.log('  API Key = ollama');
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error('');
+    console.error('端口 ' + PORT + ' 已被占用。可执行以下命令释放：');
+    console.error('  npm run api:stop');
+    console.error('');
+    process.exit(1);
+  }
+  throw err;
 });

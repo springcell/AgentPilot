@@ -1,16 +1,5 @@
 {
-  "agent": {
-    "mode": "intent",
-    "multiAgent": true,
-    "extractJsonRetries": 3,
-    "intentRetries": 3,
-    "maxRounds": 10,
-    "sameTaskRetries": 3,
-    "failLimit": 3,
-    "verifyLoopTimeoutMs": 120000
-  },
   "server": {
-    "agentTimeoutMs": 15000,
     "chatTimeoutMs": 90000,
     "healthCheckIntervalMs": 30000
   },
@@ -25,46 +14,5 @@
       "replyPollIntervalMs": 500,
       "replyPollTimeoutMs": 120000
     }
-  },
-  "execution": {
-    "allowedRoots": ["D:/Workspace", "D:/Projects", "D:/Other", "D:/Other/WOWunity/UnityWoWDatabaseEditor", "D:/", "C:/Users", "C:/Qwen3.5", "."],
-    "appMap": {
-      "notepad": "C:/Windows/System32/notepad.exe",
-      "unity_hub": "C:/Program Files/Unity Hub/Unity Hub.exe"
-    },
-    "commandWhitelist": ["dir", "type", "echo", "where", "ipconfig", "tasklist", "start"],
-    "autoApprove": true
-  },
-  "tools": [
-    {
-      "name": "run_command",
-      "description": "执行系统命令或多行 PowerShell 脚本。单条命令用 command 字段；多行脚本用 script 字段，语句之间必须用 \\n 分隔",
-      "parameters": {
-        "command": "单条命令字符串",
-        "script": "多行 PowerShell 脚本，语句间用 \\n 分隔"
-      }
-    },
-    {
-      "name": "read_file",
-      "description": "读取文件内容",
-      "parameters": {
-        "path": "文件路径"
-      }
-    },
-    {
-      "name": "write_file",
-      "description": "写入内容到文件",
-      "parameters": {
-        "path": "文件路径",
-        "content": "要写入的内容"
-      }
-    },
-    {
-      "name": "list_dir",
-      "description": "列出目录下的文件和子目录",
-      "parameters": {
-        "path": "目录路径，默认为当前目录"
-      }
-    }
-  ]
+  }
 }

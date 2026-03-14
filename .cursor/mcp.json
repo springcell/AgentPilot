@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "zero-chatgpt": {
+    "agent-pilot": {
       "command": "node",
       "args": ["src/mcp-server.js"]
     }

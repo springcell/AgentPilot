@@ -2,5 +2,7 @@ node_modules/
 .chatgpt-auth.json
 chrome-debug-profile/
 *.log
+logs/
+write_debug.log
 .env
 .DS_Store

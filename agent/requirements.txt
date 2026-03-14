@@ -1,0 +1,2 @@
+# agent_loop 使用 Python 标准库 (urllib, json)，无需额外依赖
+# executor 使用 subprocess, json, re 等标准库

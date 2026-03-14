@@ -8,7 +8,7 @@ const INVOKE_REG = /<invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/gi;
 const PARAM_REG = /<parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
 const TOOL_CALL_REG = /<tool_call\s+[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/tool_call>/gi;
 
-/** OpenClaw 工具名 -> ZeroChatgpt 工具名 */
+/** OpenClaw 工具名 -> AgentPilot 工具名 */
 const OPENCLAW_NAME_MAP = {
   bash: 'run_command',
   exec: 'run_command',

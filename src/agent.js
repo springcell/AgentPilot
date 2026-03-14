@@ -1,15 +1,13 @@
 /**
- * 2阶段优化 - Express 入口
- * POST /agent - 直接传入 llm_output
+ * AgentPilot - 纯对话入口
  * POST /chat - 通过 ChatGPT Web 对话
- * CLI: node agent.js [message] 或 无参数时启动服务
+ * CLI: node agent.js [message] 或 无参数时启动交互
  */
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { createInterface } from 'readline';
 import { fileURLToPath } from 'url';
-import router from './router.js';
 import bridge from './bridge.js';
 import { checkHealth, isHealthy, lastError } from './health/checker.js';
 
@@ -27,7 +25,6 @@ function loadServerConfig() {
 }
 
 const serverCfg = loadServerConfig();
-const AGENT_TIMEOUT = serverCfg.agentTimeoutMs ?? 15000;
 const CHAT_TIMEOUT = serverCfg.chatTimeoutMs ?? 90000;
 const HEALTH_INTERVAL = serverCfg.healthCheckIntervalMs ?? 30000;
 
@@ -57,8 +54,6 @@ checkHealth().then(() => {
   setInterval(checkHealth, HEALTH_INTERVAL);
 });
 
-app.post('/agent', withTimeout(router, AGENT_TIMEOUT));
-
 app.post('/chat', withTimeout(async (req, res) => {
   const { message, newChat } = req.body || {};
   if (!message?.trim()) {
@@ -86,12 +81,11 @@ async function runCli(message, options = {}) {
   try {
     const result = await bridge.chat(message, options);
     if (result.ok) {
-      const out = Array.isArray(result.result)
-        ? result.result.map((e) => e.name).join('\n')
-        : String(result.result ?? '');
-      process.stdout.write(out || '(Done)\n');
+      const text = typeof result.result === 'string' ? result.result : String(result.result ?? '');
+      const out = text.trim() || '(No response)';
+      process.stdout.write(out + '\n\n');
     } else if (result.code === 'CF_BLOCKED') {
-      process.stdout.write(`\n⚠️  网络访问受限\n${result.error}\n`);
+      process.stdout.write(`\nNetwork restricted\n${result.error}\n`);
     } else {
       process.stdout.write(`Error: ${result.error}\n`);
       if (result.raw) process.stdout.write(`Raw: ${result.raw.slice(0, 200)}...\n`);
@@ -119,8 +113,8 @@ async function runInteractive() {
       await runCli(msg, newChat ? { newChat: true } : {});
       prompt();
     });
-  console.log('ZeroChatgpt (open notepad, cmd, list dir, etc.)');
-  console.log('  Prefix /new to start new chat: /new 打开记事本');
+  console.log('AgentPilot - Chat with ChatGPT');
+  console.log('  Prefix /new to start new chat: /new your message');
   prompt();
 }
 
@@ -141,9 +135,8 @@ async function main() {
 
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, '127.0.0.1', () => {
-    console.log(`AI Agent running on http://127.0.0.1:${PORT}`);
-    console.log('  POST /agent - llm_output');
-    console.log('  POST /chat  - message (ChatGPT Web)');
+    console.log(`AgentPilot running on http://127.0.0.1:${PORT}`);
+    console.log('  POST /chat - message (ChatGPT Web)');
   });
 }
 
