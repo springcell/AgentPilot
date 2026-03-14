@@ -65,7 +65,7 @@ async function executeWithFallback(action) {
     const fbOut = await executeTool(fb.tool, fb.args);
     if (fbOut.ok) {
       console.log(`[Fallback] 成功`);
-      return fbOut;
+      return { ...fbOut, usedFallback: true };
     }
     console.log(`[Fallback] 失败: ${fbOut.error?.slice(0, 80)}`);
   }
@@ -87,7 +87,7 @@ async function callAgent(agentName, message, cdpOpts, isFirst = false) {
   return chatgptWeb.chat(fullMessage, {
     ...cdpOpts,
     agentId: agent.id,
-    newChat: isFirst,
+    newChat: useFirst,
   });
 }
 
@@ -147,7 +147,9 @@ ${extraHint}
 function buildUserResult(intent, verdict, actionResults) {
   const outputs = actionResults
     .filter((x) => x.ok && x.result)
-    .map((x) => `【${x.tool} 输出】\n${String(x.result).slice(0, 4000)}`);
+    .map((x) =>
+      `【${x.tool}${x.usedFallback ? ' (fallback)' : ''} 输出】\n${String(x.result).slice(0, 4000)}`
+    );
 
   return [
     intent?.answer || '',
@@ -186,6 +188,7 @@ async function executeActionWithInstaller(action, baseChatOpts) {
         args: { command: installPlan.alternativeCommand },
         fallback: [],
       });
+      out = { ...out, usedFallback: true };
     }
   }
   return out;
@@ -261,6 +264,7 @@ async function runMultiAgentLoop(userGoal, baseChatOpts, options) {
             ? JSON.stringify(out.result, null, 2).slice(0, RESULT_MAX_LEN)
             : String(out.result ?? '').slice(0, RESULT_MAX_LEN),
         error: out.error,
+        usedFallback: out.usedFallback ?? false,
       });
       if (!out.ok) {
         console.log(`[Execute] 跳过，继续下一步`);
@@ -311,6 +315,7 @@ async function runMultiAgentLoop(userGoal, baseChatOpts, options) {
                 ? JSON.stringify(out.result, null, 2).slice(0, RESULT_MAX_LEN)
                 : String(out.result ?? '').slice(0, RESULT_MAX_LEN),
             error: out.error,
+            usedFallback: out.usedFallback ?? false,
           });
         }
         const retryVerifyRes = await callAgent(

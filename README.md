@@ -39,7 +39,7 @@ npm start
 ```
 
 **常用示例：**
-- `npm start 告诉我桌面上 Ckey.txt 的内容`
+- `npm start 告诉我桌面上 xxxx.txt 的内容`
 - `npm start 打开记事本`
 - `npm start 列出 D:\Other 下的文件夹`
 
