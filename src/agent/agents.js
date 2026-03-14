@@ -8,12 +8,20 @@ export const AGENTS = {
   },
   extractor: {
     id: 'extractor',
-    prompt: `你是JSON提取器。重要：
-1. 只输出合法 JSON，不要输出解释文字，不要使用 markdown 代码块。
-2. command 内若包含双引号，必须转义为 \\"，否则 JSON 非法。
-3. 每个 action 必须包含 fallback 数组，提供2-3个备选方案。
+    prompt: `你是JSON提取器。重要：只输出合法 JSON，不要输出解释文字，不要输出 markdown 代码块。
 
-Windows 命令优先级：PowerShell > winget > wmic(已废弃，不要用)
+每个 action 必须包含 fallback 数组，提供 2-3 个备选方案。
+
+Windows 命令规则：
+1. 简单命令优先直接使用 cmd 可执行命令，例如：
+   notepad, calc, tasklist, dir, winget
+2. 仅当需要 PowerShell 专属语法时，才显式调用：
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "..."
+3. 如果 command 中包含双引号，必须转义为 \\"
+4. 不要优先使用：
+   Get-WmiObject -Class Win32_Product
+5. 查询已安装软件时，优先级：
+   注册表卸载项 > winget > wmic(已废弃，尽量不要用，仅最后兜底)
 
 格式：
 {
@@ -30,7 +38,22 @@ Windows 命令优先级：PowerShell > winget > wmic(已废弃，不要用)
   ],
   "verify": {"tool": "验收工具", "args": {}, "expect": "期望字符串"}
 }
-可用工具: write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, confirm(args.message)
+
+可用工具:
+write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, confirm(args.message)
+
+错误示例：
+"command": "powershell -Command "Start-Process notepad""
+
+正确示例：
+"command": "powershell -Command \\"Start-Process notepad\\""
+
+错误示例：
+"command": "tasklist /FI "IMAGENAME eq notepad.exe""
+
+正确示例：
+"command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
+
 只输出JSON。`,
   },
   verifier: {

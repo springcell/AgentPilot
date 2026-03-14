@@ -146,71 +146,14 @@ async function callAgent(agentName, message, cdpOpts, isFirst = false) {
 }
 
 function buildExtractorPrompt(userGoal, thinkText, extraHint = '') {
-  return `
-用户目标：${userGoal}
-
-AI分析：${thinkText}
-
-输出要求（必须遵守）：
-- 只输出合法 JSON，不要输出解释文字。
-- 不要使用 markdown 代码块。
-- 所有字符串必须符合 JSON 语法。
-- command 内若包含双引号，必须转义为 \\"，否则 JSON 非法。
-
-JSON 转义规则示例：
-错误："command": "powershell -Command "Start-Process notepad""
-正确："command": "powershell -Command \\"Start-Process notepad\\""
-
-错误："command": "tasklist /FI "IMAGENAME eq notepad.exe""
-正确："command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
-
-Windows run_command 规则：
-- run_command 默认可能通过 cmd.exe 执行。
-- 如果要使用 PowerShell 语法，必须显式调用：
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "..."
-- 不要直接输出裸 PowerShell 命令，例如：
-  Get-WmiObject、Get-ChildItem、Get-Content、$env:...
-- 查询已安装软件时，不要优先使用：
-  Get-WmiObject -Class Win32_Product
-
-Windows 查询已安装软件推荐策略：
-- 优先读取以下卸载注册表项：
-  HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*
-  HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*
-  HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*
-- 若失败，fallback 使用 winget list
-- 若仍失败，再尝试 wmic product get name
-
-输出要求：
-- answer: 给用户的简短说明
-- actions: 动作数组
-- 每个动作必须包含 tool 和 args
-- 如果主命令可能失败，应提供 fallback
-- 命令优先选择稳定、低副作用、兼容性更好的方案
-- 简单任务用简单命令，如打开记事本用 start notepad，不必硬套 PowerShell
-
-示例仅供参考：
-{
-  "answer": "我来帮你查看电脑上已安装的软件。",
-  "actions": [
-    {
-      "tool": "run_command",
-      "args": {
-        "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \\"Get-ItemProperty 'HKLM:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\*','HKLM:\\\\Software\\\\WOW6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\*','HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\*' | Select-Object DisplayName,DisplayVersion,Publisher | Where-Object { $_.DisplayName } | Sort-Object DisplayName\\""
-      },
-      "fallback": [
-        { "tool": "run_command", "args": { "command": "winget list" } },
-        { "tool": "run_command", "args": { "command": "wmic product get name" } }
-      ]
-    }
+  return [
+    `用户目标：${userGoal}`,
+    `AI分析：${thinkText}`,
+    '请提取JSON：',
+    extraHint,
   ]
-}
-
-打开记事本示例（简单命令即可）：
-{"answer":"我将帮你打开记事本。","actions":[{"tool":"run_command","args":{"command":"start notepad"}}]}
-
-${extraHint}
-`.trim();
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 const USER_RESULT_MAX_LEN = 7000;
