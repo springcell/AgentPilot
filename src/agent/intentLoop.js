@@ -27,10 +27,17 @@ function loadAgentConfig() {
 }
 
 function tryParseJSON(raw) {
-  if (!raw) return null;
+  const result = tryParseJSONWithError(raw);
+  return result.parsed;
+}
+
+function tryParseJSONWithError(raw) {
+  if (!raw) return { parsed: null, parseError: { message: 'Empty input' } };
   try {
-    return JSON.parse(raw);
-  } catch (_) {}
+    return { parsed: JSON.parse(raw), parseError: null };
+  } catch (e) {
+    // fall through to repairs
+  }
 
   let repaired = raw
     .replace(/"command"\s*:\s*"powershell([^"]*?) -Command "([^"]*?)""/g, (_, a, b) =>
@@ -38,9 +45,14 @@ function tryParseJSON(raw) {
     )
     .replace(/"command"\s*:\s*"tasklist \/FI "([^"]*?)""/g, (_, a) =>
       `"command":"tasklist /FI \\"${a}\\""`
+    )
+    .replace(/"command"\s*:\s*"powershell([^"]*?) -Class "([^"]+)"/g, (_, a, b) =>
+      `"command":"powershell${a} -Class \\"${b}\\""`
+    )
+    .replace(/"command"\s*:\s*"reg query ([^"]*?)"/g, (_, path) =>
+      `"command":"reg query ${path.replace(/\\/g, '\\\\')}"`
     );
 
-  // 修复 command 中未转义的反斜杠（如注册表路径 HKEY_LOCAL_MACHINE\SOFTWARE）
   repaired = repaired.replace(
     /"command"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
     (match, content) => {
@@ -50,24 +62,27 @@ function tryParseJSON(raw) {
   );
 
   try {
-    return JSON.parse(repaired);
-  } catch (_) {
-    return null;
+    return { parsed: JSON.parse(repaired), parseError: null };
+  } catch (e) {
+    return { parsed: null, parseError: { message: e?.message ?? String(e), raw } };
   }
 }
 
-function parseJSON(text) {
-  if (!text || typeof text !== 'string') return null;
+function parseJSONWithError(text) {
+  if (!text || typeof text !== 'string') {
+    return { parsed: null, parseError: { message: 'Empty or invalid input' } };
+  }
   const raw = text.trim();
 
+  const candidates = [];
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) return tryParseJSON(fenceMatch[1].trim());
+  if (fenceMatch) candidates.push(fenceMatch[1].trim());
 
   const jsonLabelMatch = raw.match(/JSON\s*\n(\{[\s\S]*\})/);
-  if (jsonLabelMatch) return tryParseJSON(jsonLabelMatch[1].trim());
+  if (jsonLabelMatch) candidates.push(jsonLabelMatch[1].trim());
 
   const bareMatch = raw.match(/\{[\s\S]*?"(?:actions|passed|isDependencyIssue)"[\s\S]*\}/);
-  if (bareMatch) return tryParseJSON(bareMatch[0].trim());
+  if (bareMatch) candidates.push(bareMatch[0].trim());
 
   const startIdx = raw.indexOf('{');
   if (startIdx >= 0) {
@@ -99,14 +114,24 @@ function parseJSON(text) {
         }
       }
     }
-    if (endIdx >= 0) return tryParseJSON(raw.slice(startIdx, endIdx + 1));
-    let candidate = raw.slice(startIdx);
+    if (endIdx >= 0) candidates.push(raw.slice(startIdx, endIdx + 1));
     for (const suffix of ['}', ']}', ']}]}', '}]}']) {
-      const parsed = tryParseJSON(candidate + suffix);
-      if (parsed) return parsed;
+      candidates.push(raw.slice(startIdx) + suffix);
     }
   }
-  return null;
+
+  let lastError = { message: 'No valid JSON found' };
+  for (const candidate of candidates) {
+    const result = tryParseJSONWithError(candidate);
+    if (result.parsed) return result;
+    if (result.parseError) lastError = result.parseError;
+  }
+  return { parsed: null, parseError: lastError };
+}
+
+function parseJSON(text) {
+  const result = parseJSONWithError(text);
+  return result.parsed;
 }
 
 async function executeTool(toolName, args) {
@@ -116,6 +141,31 @@ async function executeTool(toolName, args) {
 }
 
 let lastErrorFeedback = null;
+
+function generateJSONParseErrorDetails(raw, parseError) {
+  const msg = parseError?.message ?? '';
+  const positionMatch = msg.match(/position\s+(\d+)/i);
+  const position = positionMatch ? parseInt(positionMatch[1], 10) : null;
+  const snippetLen = 50;
+  let rawSnippet = '';
+  if (raw && position != null) {
+    const start = Math.max(0, position - snippetLen);
+    const end = Math.min(raw.length, position + snippetLen);
+    rawSnippet = raw.slice(start, end);
+    if (start > 0) rawSnippet = '...' + rawSnippet;
+    if (end < raw.length) rawSnippet = rawSnippet + '...';
+  } else if (raw) {
+    rawSnippet = raw.slice(0, 150) + (raw.length > 150 ? '...' : '');
+  }
+  return {
+    type: 'JSON_PARSE_ERROR',
+    message: msg,
+    position: position ?? undefined,
+    rawSnippet,
+    suggestion:
+      'command 内双引号必须转义为 \\"，路径反斜杠转义为 \\\\。参考正确示例。',
+  };
+}
 
 function generateErrorDetails(error, context = {}) {
   const msg = error?.message ?? String(error ?? '');
@@ -241,24 +291,9 @@ function buildExtractorPrompt(userGoal, thinkText, extraHint = '') {
 
 AI分析：${thinkText}
 
-你是JSON提取器。重要：只输出合法 JSON，不要输出解释文字，不要输出 markdown 代码块。
+你是JSON提取器。只输出合法 JSON，不要输出解释文字或 markdown 代码块。
 
 每个 action 必须包含 fallback 数组，提供 2-3 个备选方案。
-
-Windows 命令规则：
-1. 简单命令优先直接使用 cmd 可执行命令，例如：
-   notepad, calc, tasklist, dir, winget, start
-2. 仅当需要 PowerShell 专属语法时，才显式调用：
-   powershell -NoProfile -ExecutionPolicy Bypass -Command "..."
-3. 主 action、fallback、verify 中的所有 command 字符串都必须符合 JSON 语法：
-   - 双引号必须转义为 \\"
-   - 路径中的反斜杠必须转义为 \\\\（如注册表路径 HKEY_LOCAL_MACHINE\\\\SOFTWARE\\\\...）
-4. 不要直接输出裸 PowerShell 命令，例如：
-   Get-WmiObject、Get-ChildItem、Get-Content、$env:...
-5. 查询已安装软件时，不要优先使用：
-   Get-WmiObject -Class Win32_Product
-6. 查询已安装软件时优先级：
-   注册表卸载项 > winget > wmic(仅最后兜底)
 
 格式：
 {
@@ -276,26 +311,7 @@ Windows 命令规则：
   "verify": {"tool": "验收工具", "args": {}, "expect": "期望字符串"}
 }
 
-可用工具:
-write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, confirm(args.message)
-
-错误示例：
-"command": "powershell -Command "Start-Process notepad""
-
-正确示例：
-"command": "powershell -Command \\"Start-Process notepad\\""
-
-错误示例：
-"command": "tasklist /FI "IMAGENAME eq notepad.exe""
-
-正确示例：
-"command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
-
-错误示例（注册表路径反斜杠未转义）：
-"command": "reg query HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft..."
-
-正确示例：
-"command": "reg query HKEY_LOCAL_MACHINE\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\*"
+可用工具: write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, confirm(args.message)
 
 ${extraHint}
 `.trim();
@@ -399,21 +415,42 @@ async function runMultiAgentLoop(userGoal, baseChatOpts, options) {
     const thinkText = thinkRes?.text || '';
     console.log('[Agent:Thinker] 完成:', thinkText?.slice(0, 100));
 
-    console.log('[Agent:Extractor] 提取JSON...');
-    const extractRes = await callAgent(
-      'extractor',
-      buildExtractorPrompt(userGoal, thinkText),
-      baseChatOpts,
-      true
-    );
-    console.log('[Agent:Extractor] 完成:', extractRes?.text?.slice(0, 200));
+    const cfg = loadAgentConfig();
+    const extractJsonRetries = options.extractJsonRetries ?? cfg.extractJsonRetries ?? 3;
+    let extractRes = null;
+    let intent = null;
+    let parseErrorFeedback = null;
 
-    const intent = parseJSON(extractRes?.text || '');
-    console.log('[Intent]', JSON.stringify(intent, null, 2));
+    for (let attempt = 0; attempt <= extractJsonRetries; attempt++) {
+      const extraHint = parseErrorFeedback
+        ? `\n【JSON 解析失败，请修正】\n${JSON.stringify(parseErrorFeedback, null, 2)}\n\n请重新输出合法 JSON。`
+        : '';
 
-    if (!intent?.actions) {
-      return { ok: false, error: 'Extraction failed: no valid JSON' };
+      console.log(`[Agent:Extractor] 提取JSON...${attempt > 0 ? ` (重试 ${attempt}/${extractJsonRetries})` : ''}`);
+      extractRes = await callAgent(
+        'extractor',
+        buildExtractorPrompt(userGoal, thinkText, extraHint),
+        baseChatOpts,
+        attempt === 0
+      );
+      console.log('[Agent:Extractor] 完成:', extractRes?.text?.slice(0, 200));
+
+      const parseResult = parseJSONWithError(extractRes?.text || '');
+      intent = parseResult.parsed;
+
+      if (intent?.actions?.length) {
+        break;
+      }
+
+      if (attempt >= extractJsonRetries) {
+        return { ok: false, error: 'Extraction failed: no valid JSON' };
+      }
+
+      const rawForError = parseResult.parseError?.raw ?? extractRes?.text ?? '';
+      parseErrorFeedback = generateJSONParseErrorDetails(rawForError, parseResult.parseError);
     }
+
+    console.log('[Intent]', JSON.stringify(intent, null, 2));
 
     const actionResults = [];
     for (const action of intent.actions ?? []) {
