@@ -56,3 +56,5 @@ Shell指令（命令、脚本、安装）：
 - 执行命令/脚本/安装包 → powershell / cmd / python
 - 读文件、写文件、遍历目录、多处替换、行编辑、复制/移动/删除 → file_op
 - 创建目录 → file_op mkdir
+- 查找已安装程序（如 Unity）→ file_op find_program name="Unity"
+- 启动程序 → file_op launch path="<可执行文件路径>"

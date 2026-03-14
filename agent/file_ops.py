@@ -5,6 +5,8 @@ AI 通过 JSON 指令调用，支持遍历、读取、写入、修改、复制�
 支持的 action：
   list        列出目录内容
   find        按模式递归搜索文件
+  find_program 查找已安装程序（注册表+常见路径，支持全盘）
+  launch      启动程序
   read        读取文件内容
   write       写入/覆盖文件（自动创建目录）
   append      追加内容到文件末尾
@@ -24,6 +26,8 @@ import os
 import re
 import shutil
 import fnmatch
+import sys
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -272,8 +276,121 @@ def _op_tree(params: dict) -> dict:
     return {"ok": True, "tree": "\n".join(lines)}
 
 
+def _op_find_program(params: dict) -> dict:
+    """
+    查找已安装程序：先查注册表，再查常见安装路径。
+    name: 程序名（如 Unity、Chrome），支持模糊匹配
+    """
+    name = (params.get("name") or params.get("pattern") or "").strip()
+    if not name:
+        return {"ok": False, "error": "name 或 pattern 不能为空"}
+    name_lower = name.lower()
+    results = []
+
+    # 1. Windows 注册表查找
+    if sys.platform == "win32":
+        try:
+            import winreg
+            keys = [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"),
+            ]
+            for hkey, subkey in keys:
+                try:
+                    key = winreg.OpenKey(hkey, subkey.replace("\\*", ""))
+                    for i in range(winreg.QueryInfoKey(key)[0]):
+                        try:
+                            subname = winreg.EnumKey(key, i)
+                            subkey_full = subkey.replace("\\*", "") + "\\" + subname
+                            subkey_handle = winreg.OpenKey(hkey, subkey_full)
+                            def _reg_get(k, n):
+                                try:
+                                    return winreg.QueryValueEx(k, n)[0]
+                                except OSError:
+                                    return ""
+                            display_name = _reg_get(subkey_handle, "DisplayName") or ""
+                            install_loc = _reg_get(subkey_handle, "InstallLocation") or ""
+                            display_icon = _reg_get(subkey_handle, "DisplayIcon") or ""
+                            if name_lower in display_name.lower():
+                                path = install_loc or (display_icon.split(",")[0].strip('"') if display_icon else "")
+                                if path and os.path.exists(path):
+                                    results.append({"name": display_name, "path": path, "source": "registry"})
+                            winreg.CloseKey(subkey_handle)
+                        except OSError:
+                            continue
+                    winreg.CloseKey(key)
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+
+    # 2. 常见安装路径快速查找（Program Files 等）
+    common_roots = []
+    if sys.platform == "win32":
+        pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+        pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        common_roots = [pf, pf86]
+    for root in common_roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                if name_lower in entry.lower():
+                    full = os.path.join(root, entry)
+                    if os.path.isdir(full):
+                        # 直接可执行文件
+                        for exe in ["Unity Hub.exe", "Unity.exe", f"{entry}.exe"]:
+                            cand = os.path.join(full, exe)
+                            if os.path.isfile(cand):
+                                results.append({"name": entry, "path": cand, "source": "path"})
+                                break
+                        # Unity Hub 结构: Unity Hub/Editor/2022.x/Editor/Unity.exe
+                        hub_editor = os.path.join(full, "Editor")
+                        if os.path.isdir(hub_editor):
+                            for v in os.listdir(hub_editor):
+                                uv = os.path.join(hub_editor, v, "Editor", "Unity.exe")
+                                if os.path.isfile(uv):
+                                    results.append({"name": f"{entry} {v}", "path": uv, "source": "path"})
+                        # 旧版 Unity: Unity/Editor/Unity.exe
+                        ed = os.path.join(full, "Editor", "Unity.exe")
+                        if os.path.isfile(ed):
+                            results.append({"name": entry, "path": ed, "source": "path"})
+        except PermissionError:
+            continue
+
+    # 去重
+    seen = set()
+    unique = []
+    for r in results:
+        p = r["path"]
+        if p not in seen:
+            seen.add(p)
+            unique.append(r)
+
+    if not unique:
+        return {"ok": True, "count": 0, "results": [], "message": f"未找到包含 '{name}' 的已安装程序"}
+    return {"ok": True, "count": len(unique), "results": unique}
+
+
+def _op_launch(params: dict) -> dict:
+    """启动程序。path: 可执行文件或快捷方式路径"""
+    path = _expand(params.get("path", ""))
+    if not path or not os.path.exists(path):
+        return {"ok": False, "error": f"路径不存在: {path}"}
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        else:
+            subprocess.Popen([path], start_new_session=True)
+        return {"ok": True, "path": path, "message": "已启动"}
+    except Exception as e:
+        return {"ok": False, "error": f"启动失败: {e}"}
+
+
 _ACTIONS = {
-    "list": _op_list, "find": _op_find, "read": _op_read, "write": _op_write,
+    "list": _op_list, "find": _op_find, "find_program": _op_find_program, "launch": _op_launch,
+    "read": _op_read, "write": _op_write,
     "append": _op_append, "patch": _op_patch, "insert": _op_insert,
     "delete_lines": _op_delete_lines, "mkdir": _op_mkdir,
     "copy": _op_copy, "move": _op_move, "delete": _op_delete,
@@ -307,6 +424,8 @@ def schema_hint() -> str:
 |-------------|----------------|----------------------|---------------------------------|
 | list        | 列出目录         | path                 |                                 |
 | find        | 搜索文件         | path                 | pattern(*.txt) regex max_depth  |
+| find_program| 查找已安装程序    | name                 | 注册表+Program Files，支持Unity等 |
+| launch      | 启动程序         | path                 | 可执行文件路径                    |
 | read        | 读取文件         | path                 | line_start line_end             |
 | write       | 写入/覆盖        | path content         | encoding                        |
 | append      | 追加内容         | path content         | newline                         |
@@ -323,6 +442,15 @@ def schema_hint() -> str:
 patch 示例：
 ```json
 {"command":"file_op","action":"patch","path":"%DESKTOP%\\\\news.txt","replacements":[{"old":"旧","new":"新"}]}
+```
+
+查找并打开程序（如 Unity）：
+```json
+{"command":"file_op","action":"find_program","name":"Unity"}
+```
+找到后使用 launch 启动：
+```json
+{"command":"file_op","action":"launch","path":"<find_program 返回的 path>"}
 ```
 路径支持 %USERPROFILE% %DESKTOP% %DOCUMENTS% 等环境变量。
 """

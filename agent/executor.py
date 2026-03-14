@@ -94,6 +94,14 @@ def _fmt_file_op(action: str, r: dict) -> str:
         trunc = "（结果已截断）" if r.get("truncated") else ""
         lines = [f"{i['type']}  {i['path']}" for i in items]
         return f"找到 {r['count']} 项{trunc}:\n" + "\n".join(lines)
+    if action == "find_program":
+        items = r.get("results", [])
+        if not items:
+            return r.get("message", "未找到")
+        lines = [f"{i.get('name','')}  {i['path']}" for i in items]
+        return f"找到 {r['count']} 个程序:\n" + "\n".join(lines)
+    if action == "launch":
+        return r.get("message", "已启动") + f"\n路径: {r.get('path','')}"
     if action == "list":
         entries = r.get("entries", [])
         lines = [f"{'[D]' if e['type']=='dir' else '[F]'} {e['name']}" for e in entries]
