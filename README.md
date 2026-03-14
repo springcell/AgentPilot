@@ -82,6 +82,47 @@ curl -X POST http://127.0.0.1:3000/tools/invoke -H "Content-Type: application/js
 2. 项目已配置 `.cursor/mcp.json`，重启 Cursor 后自动加载
 3. 在 Agent 中说「用 ask_chatgpt 问 ChatGPT：xxx」
 
+#### `.cursor/mcp.json` 配置说明
+
+MCP（Model Context Protocol）让 Cursor 能调用本项目的 `ask_chatgpt` 工具。配置示例：
+
+```json
+{
+  "mcpServers": {
+    "zero-chatgpt": {
+      "command": "node",
+      "args": ["src/mcp-server.js"]
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `mcpServers` | MCP 服务列表，key 为服务名（如 `zero-chatgpt`） |
+| `command` | 启动命令，使用 `node` 运行 MCP 服务 |
+| `args` | 命令参数，`src/mcp-server.js` 为项目内的 MCP 入口 |
+
+**注意：**
+
+- 路径 `src/mcp-server.js` 相对于**项目根目录**（即 `package.json` 所在目录）
+- Cursor 会在打开该工作区时自动以项目根目录为 `cwd` 执行上述命令
+- 若项目不在工作区根目录，需加 `cwd` 指定工作目录，例如：
+
+```json
+{
+  "mcpServers": {
+    "zero-chatgpt": {
+      "command": "node",
+      "args": ["src/mcp-server.js"],
+      "cwd": "D:/Other/WOWunity/ZeroChatgpt"
+    }
+  }
+}
+```
+
+**验证：** 重启 Cursor 后，在 Agent 中提及「用 ask_chatgpt 问…」，Agent 应能调用该工具。若未生效，检查 Chrome 是否已启动并登录 chatgpt.com。
+
 ### 方式 B：API 替换主模型（需 ngrok）
 
 Cursor 请求会经过其后端，Base URL 必须公网可访问。本地需用 ngrok 暴露：
