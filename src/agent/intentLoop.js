@@ -27,23 +27,74 @@ function loadAgentConfig() {
 }
 
 function parseJSON(text) {
-  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (!text || typeof text !== 'string') return null;
+  const raw = text.trim();
+
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
     try {
       return JSON.parse(fenceMatch[1].trim());
     } catch (_) {}
   }
-  const jsonLabelMatch = text.match(/JSON\s*\n(\{[\s\S]*\})/);
+  const jsonLabelMatch = raw.match(/JSON\s*\n(\{[\s\S]*\})/);
   if (jsonLabelMatch) {
     try {
       return JSON.parse(jsonLabelMatch[1].trim());
     } catch (_) {}
   }
-  const bareMatch = text.match(/\{[\s\S]*?"(?:actions|passed|isDependencyIssue)"[\s\S]*\}/);
+  const bareMatch = raw.match(/\{[\s\S]*?"(?:actions|passed|isDependencyIssue)"[\s\S]*\}/);
   if (bareMatch) {
     try {
       return JSON.parse(bareMatch[0].trim());
     } catch (_) {}
+  }
+  // 尝试从第一个 { 开始提取，支持截断 JSON 自动补全
+  const startIdx = raw.indexOf('{');
+  if (startIdx >= 0) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let endIdx = -1;
+    const q = raw[startIdx];
+    for (let i = startIdx; i < raw.length; i++) {
+      const c = raw[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === '\\' && inString) {
+        escape = true;
+        continue;
+      }
+      if (inString) {
+        if (c === q) inString = false;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        inString = true;
+        continue;
+      }
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') {
+        depth--;
+        if (depth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+    }
+    if (endIdx >= 0) {
+      try {
+        return JSON.parse(raw.slice(startIdx, endIdx + 1));
+      } catch (_) {}
+    }
+    // 截断时尝试补全
+    let candidate = raw.slice(startIdx);
+    for (const suffix of ['}', ']}', ']}]}', '}]}']) {
+      try {
+        return JSON.parse(candidate + suffix);
+      } catch (_) {}
+    }
   }
   return null;
 }
@@ -58,6 +109,7 @@ async function executeWithFallback(action) {
   const out = await executeTool(action.tool, action.args);
   if (out.ok) return out;
 
+  const errors = [out.error];
   console.log(`[Fallback] 主命令失败: ${out.error?.slice(0, 100)}`);
 
   for (const fb of action.fallback ?? []) {
@@ -67,10 +119,12 @@ async function executeWithFallback(action) {
       console.log(`[Fallback] 成功`);
       return { ...fbOut, usedFallback: true };
     }
+    errors.push(fbOut.error);
     console.log(`[Fallback] 失败: ${fbOut.error?.slice(0, 80)}`);
   }
 
-  return { ok: false, error: `All fallbacks exhausted for ${action.tool}` };
+  const errStr = errors.filter(Boolean).join(' | ').slice(0, 500);
+  return { ok: false, error: `All fallbacks exhausted for ${action.tool}: ${errStr}` };
 }
 
 const RESULT_MAX_LEN = 800;
@@ -97,7 +151,18 @@ function buildExtractorPrompt(userGoal, thinkText, extraHint = '') {
 
 AI分析：${thinkText}
 
-请只输出 JSON。
+输出要求（必须遵守）：
+- 只输出合法 JSON，不要输出解释文字。
+- 不要使用 markdown 代码块。
+- 所有字符串必须符合 JSON 语法。
+- command 内若包含双引号，必须转义为 \\"，否则 JSON 非法。
+
+JSON 转义规则示例：
+错误："command": "powershell -Command "Start-Process notepad""
+正确："command": "powershell -Command \\"Start-Process notepad\\""
+
+错误："command": "tasklist /FI "IMAGENAME eq notepad.exe""
+正确："command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
 
 Windows run_command 规则：
 - run_command 默认可能通过 cmd.exe 执行。
@@ -122,6 +187,7 @@ Windows 查询已安装软件推荐策略：
 - 每个动作必须包含 tool 和 args
 - 如果主命令可能失败，应提供 fallback
 - 命令优先选择稳定、低副作用、兼容性更好的方案
+- 简单任务用简单命令，如打开记事本用 start notepad，不必硬套 PowerShell
 
 示例仅供参考：
 {
@@ -140,9 +206,14 @@ Windows 查询已安装软件推荐策略：
   ]
 }
 
+打开记事本示例（简单命令即可）：
+{"answer":"我将帮你打开记事本。","actions":[{"tool":"run_command","args":{"command":"start notepad"}}]}
+
 ${extraHint}
 `.trim();
 }
+
+const USER_RESULT_MAX_LEN = 7000;
 
 function buildUserResult(intent, verdict, actionResults) {
   const outputs = actionResults
@@ -151,10 +222,15 @@ function buildUserResult(intent, verdict, actionResults) {
       `【${x.tool}${x.usedFallback ? ' (fallback)' : ''} 输出】\n${String(x.result).slice(0, 4000)}`
     );
 
+  let resultPart = outputs.length ? `\n\n执行结果：\n${outputs.join('\n\n')}` : '';
+  if (resultPart.length > USER_RESULT_MAX_LEN) {
+    resultPart = resultPart.slice(0, USER_RESULT_MAX_LEN) + '\n\n[输出过长，已省略]';
+  }
+
   return [
     intent?.answer || '',
     verdict?.reason ? `\n执行结论：${verdict.reason}` : '',
-    outputs.length ? `\n\n执行结果：\n${outputs.join('\n\n')}` : '',
+    resultPart,
   ]
     .join('')
     .trim() || 'Done';

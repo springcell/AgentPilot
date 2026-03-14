@@ -8,7 +8,11 @@ export const AGENTS = {
   },
   extractor: {
     id: 'extractor',
-    prompt: `你是JSON提取器。重要：每个 action 必须包含 fallback 数组，提供2-3个备选方案。
+    prompt: `你是JSON提取器。重要：
+1. 只输出合法 JSON，不要输出解释文字，不要使用 markdown 代码块。
+2. command 内若包含双引号，必须转义为 \\"，否则 JSON 非法。
+3. 每个 action 必须包含 fallback 数组，提供2-3个备选方案。
+
 Windows 命令优先级：PowerShell > winget > wmic(已废弃，不要用)
 
 格式：
