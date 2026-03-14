@@ -60,12 +60,12 @@ checkHealth().then(() => {
 app.post('/agent', withTimeout(router, AGENT_TIMEOUT));
 
 app.post('/chat', withTimeout(async (req, res) => {
-  const { message } = req.body || {};
+  const { message, newChat } = req.body || {};
   if (!message?.trim()) {
     return res.json({ error: 'message is required' });
   }
   try {
-    const result = await bridge.chat(message);
+    const result = await bridge.chat(message, { newChat: !!newChat });
     res.json(result);
   } catch (e) {
     if (!res.headersSent) {
@@ -81,15 +81,17 @@ app.get('/health', (_req, res) => {
   return res.status(500).json({ status: 'error', message: lastError ?? 'System is down' });
 });
 
-async function runCli(message) {
+async function runCli(message, options = {}) {
   process.stdout.write('Thinking...\n');
   try {
-    const result = await bridge.chat(message);
+    const result = await bridge.chat(message, options);
     if (result.ok) {
       const out = Array.isArray(result.result)
         ? result.result.map((e) => e.name).join('\n')
         : String(result.result ?? '');
       process.stdout.write(out || '(Done)\n');
+    } else if (result.code === 'CF_BLOCKED') {
+      process.stdout.write(`\n⚠️  网络访问受限\n${result.error}\n`);
     } else {
       process.stdout.write(`Error: ${result.error}\n`);
       if (result.raw) process.stdout.write(`Raw: ${result.raw.slice(0, 200)}...\n`);
@@ -112,19 +114,23 @@ async function runInteractive() {
         rl.close();
         return;
       }
-      await runCli(input);
+      const newChat = input.startsWith('/new ');
+      const msg = newChat ? input.slice(5).trim() : input;
+      await runCli(msg, newChat ? { newChat: true } : {});
       prompt();
     });
   console.log('ZeroChatgpt (open notepad, cmd, list dir, etc.)');
+  console.log('  Prefix /new to start new chat: /new 打开记事本');
   prompt();
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  const message = args.join(' ').trim();
+  const newChat = args[0] === '/new' || args[0] === '--new';
+  const message = newChat ? args.slice(1).join(' ').trim() : args.join(' ').trim();
 
   if (message) {
-    await runCli(message);
+    await runCli(message, { newChat });
     return;
   }
 

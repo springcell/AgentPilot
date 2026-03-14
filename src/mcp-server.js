@@ -40,6 +40,7 @@ server.registerTool('ask_chatgpt', {
       chatgptUrl: cdp.chatgptUrl ?? 'https://chatgpt.com/',
       pollIntervalMs: cdp.replyPollIntervalMs ?? 500,
       pollTimeoutMs: cdp.replyPollTimeoutMs ?? 120000,
+      pageReadyTimeoutMs: cdp.pageReadyTimeoutMs ?? 15000,
     });
     const text = result.text || '(empty response)';
     return {

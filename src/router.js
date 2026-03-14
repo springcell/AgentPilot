@@ -34,8 +34,12 @@ export async function processLlmOutput(llm_output) {
     logger({ event: 'tool_ok', tool: tool.name });
     return { ok: true, result };
   } catch (e) {
+    const errParts = [e.message];
+    if (e.stdout) errParts.push('stdout: ' + String(e.stdout).slice(0, 500));
+    if (e.stderr) errParts.push('stderr: ' + String(e.stderr).slice(0, 500));
+    const fullError = errParts.filter(Boolean).join('\n');
     logger({ event: 'tool_error', tool: tool.name, error: e.message });
-    return { ok: false, error: e.message };
+    return { ok: false, error: fullError };
   }
 }
 

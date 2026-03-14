@@ -127,6 +127,7 @@ async function handleChatCompletions(body) {
       chatgptUrl: cdp.chatgptUrl ?? 'https://chatgpt.com/',
       pollIntervalMs: cdp.replyPollIntervalMs ?? 500,
       pollTimeoutMs: cdp.replyPollTimeoutMs ?? 120000,
+      pageReadyTimeoutMs: cdp.pageReadyTimeoutMs ?? 15000,
     });
 
     let content = result.text || '';

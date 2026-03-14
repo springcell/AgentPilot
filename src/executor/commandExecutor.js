@@ -2,10 +2,7 @@
  * 命令执行器 - 经 commandGuard 后执行
  */
 import { exec } from 'child_process';
-import { promisify } from 'util';
 import commandGuard from '../security/commandGuard.js';
-
-const execAsync = promisify(exec);
 
 export default function execCommand(cmd) {
   return new Promise((resolve, reject) => {
@@ -20,8 +17,14 @@ export default function execCommand(cmd) {
       runCmd = `cmd.exe /d /s /c ${JSON.stringify(escaped)}`;
     }
 
-    execAsync(runCmd, { timeout: 30000 })
-      .then(({ stdout }) => resolve(stdout?.trim() ?? ''))
-      .catch((err) => reject(err));
+    exec(runCmd, { timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = [err.message];
+        if (stdout) msg.push('stdout: ' + String(stdout).trim().slice(0, 500));
+        if (stderr) msg.push('stderr: ' + String(stderr).trim().slice(0, 500));
+        return reject(new Error(msg.filter(Boolean).join('\n')));
+      }
+      resolve(stdout?.trim() ?? '');
+    });
   });
 }

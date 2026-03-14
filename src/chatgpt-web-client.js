@@ -61,8 +61,47 @@ export async function connectChrome(cdpUrl = 'http://127.0.0.1:9222') {
   return browser;
 }
 
+let browserInstance = null;
+let _connectingPromise = null;
+
+async function getBrowser(cdpUrl) {
+  if (browserInstance) {
+    try {
+      await browserInstance.pages();
+      return browserInstance;
+    } catch (_) {
+      browserInstance = null;
+    }
+  }
+  if (_connectingPromise) return _connectingPromise;
+  _connectingPromise = puppeteer
+    .connect({ browserURL: cdpUrl, defaultViewport: null })
+    .then((b) => {
+      browserInstance = b;
+      _connectingPromise = null;
+      return b;
+    })
+    .catch((e) => {
+      _connectingPromise = null;
+      throw e;
+    });
+  return _connectingPromise;
+}
+
+export async function disconnectBrowser() {
+  if (browserInstance) {
+    try {
+      await browserInstance.disconnect();
+    } catch (_) {}
+    browserInstance = null;
+  }
+  _connectingPromise = null;
+}
+
 /**
  * 认证流程: 打开 chatgpt.com，等待用户登录，抓取 cookie + userAgent
+ * 注意: 使用 connectChrome() 创建独立临时连接，不共用 getBrowser() 单例，
+ * 认证结束后 browser.disconnect() 关闭，不影响 chat() 使用的 browserInstance
  */
 export async function auth(cdpUrl = 'http://127.0.0.1:9222', chatgptUrl = 'https://chatgpt.com/') {
   const browser = await connectChrome(cdpUrl);
@@ -116,47 +155,148 @@ export async function auth(cdpUrl = 'http://127.0.0.1:9222', chatgptUrl = 'https
  * 加载缓存的认证信息
  */
 function loadAuth() {
-  if (fs.existsSync(AUTH_CACHE_PATH)) {
+  if (!fs.existsSync(AUTH_CACHE_PATH)) return null;
+  try {
     return JSON.parse(fs.readFileSync(AUTH_CACHE_PATH, 'utf-8'));
+  } catch (e) {
+    console.warn('[auth] 缓存文件损坏，忽略:', e.message);
+    return null;
   }
-  return null;
 }
+
+const agentPages = {};
+
+async function isPageAlive(page) {
+  try {
+    await page.evaluate(() => true);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+export async function closeAgent(agentId) {
+  const page = agentPages[agentId];
+  if (page) {
+    try {
+      await page.close();
+    } catch (_) {}
+    delete agentPages[agentId];
+  }
+}
+
+export async function closeAllAgents() {
+  for (const id of Object.keys(agentPages)) {
+    await closeAgent(id);
+  }
+}
+
+async function checkCloudflareBlock(page) {
+  return await page.evaluate(() => {
+    const body = document.body?.innerText || '';
+    const title = document.title || '';
+    if (
+      body.includes('Edge IP Restricted') ||
+      body.includes('Error reference number: 1034') ||
+      title.includes('1034') ||
+      (body.includes('Ray ID') && body.includes('chatgpt.com'))
+    ) {
+      const rayId = body.match(/Ray ID:\s*([a-f0-9]+)/i)?.[1] ?? 'unknown';
+      const ip = body.match(/Your IP address:\s*([\d.]+)/)?.[1] ?? 'unknown';
+      return { blocked: true, rayId, ip };
+    }
+    return { blocked: false };
+  });
+}
+
+const _agentQueues = {};
 
 /**
  * 聊天: DOM 模拟发送消息并轮询获取最后一条回复
+ * 按 agentId 分槽串行，同 Tab 不乱序，不同 Tab 可并行
  */
 export async function chat(message, options = {}) {
+  const id = options.agentId ?? 'default';
+  const prev = _agentQueues[id] ?? Promise.resolve();
+  _agentQueues[id] = prev
+    .catch(() => {})
+    .then(() => doChat(message, options));
+  return _agentQueues[id];
+}
+
+async function doChat(message, options = {}) {
   const {
     cdpUrl = 'http://127.0.0.1:9222',
     chatgptUrl = 'https://chatgpt.com/',
     pollIntervalMs = 500,
     pollTimeoutMs = 120000,
+    newChat = false,
+    pageReadyTimeoutMs = 15000,
+    agentId = 'default',
   } = options;
 
-  const browser = await connectChrome(cdpUrl);
-  const pages = await browser.pages();
-  let page = pages.find(p => p.url().includes('chatgpt.com'));
+  const browser = await getBrowser(cdpUrl);
+  let page = agentPages[agentId];
 
-  if (!page) {
-    page = await browser.newPage();
-    const cached = loadAuth();
-    if (cached?.cookies?.length) {
-      await page.setCookie(...cached.cookies);
-      if (cached.userAgent) await page.setUserAgent(cached.userAgent);
+  if (agentId !== 'default') {
+    if (!page || !(await isPageAlive(page))) {
+      page = await browser.newPage();
+      const cached = loadAuth();
+      if (cached?.cookies?.length) {
+        await page.setCookie(...cached.cookies);
+        if (cached.userAgent) await page.setUserAgent(cached.userAgent);
+      }
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      agentPages[agentId] = page;
+    } else {
+      await page.bringToFront();
     }
-    await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
   } else {
-    await page.bringToFront();
+    const pages = await browser.pages();
+    page = pages.find(p => p.url().includes('chatgpt.com'));
+    if (!page) {
+      page = await browser.newPage();
+      const cached = loadAuth();
+      if (cached?.cookies?.length) {
+        await page.setCookie(...cached.cookies);
+        if (cached.userAgent) await page.setUserAgent(cached.userAgent);
+      }
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+    } else {
+      await page.bringToFront();
+    }
   }
 
-  // 查找输入框并输入
-  const inputSelector = await findFirst(page, SELECTORS.input);
+  if (newChat) {
+    const newChatBtn = await findFirst(page, ['button[aria-label*="New chat"]', 'a[href="/"]', '[data-testid="new-chat-button"]']);
+    if (newChatBtn) {
+      await page.click(newChatBtn);
+      await new Promise(r => setTimeout(r, 2000));
+    } else {
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+    }
+  }
+
+  const cfCheck = await checkCloudflareBlock(page);
+  if (cfCheck.blocked) {
+    await disconnectBrowser();
+    throw new Error(
+      `CF_BLOCKED:Edge IP Restricted (1034)\n` +
+      `IP: ${cfCheck.ip} 被 Cloudflare 限制访问 chatgpt.com\n` +
+      `Ray ID: ${cfCheck.rayId}\n` +
+      `解决方法：更换网络/代理，或等待 IP 解封`
+    );
+  }
+
+  const waitOpts = { timeout: pageReadyTimeoutMs };
+
+  const inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
   if (!inputSelector) throw new Error('Input box not found, ensure you are on chatgpt.com');
 
   await page.click(inputSelector);
 
   // ChatGPT 使用 ProseMirror contenteditable，需用 native setter 或 execCommand 才能更新 React 状态
-  const inputSucceeded = await page.evaluate((sel, text) => {
+  const filled = await page.evaluate((sel, text) => {
     const el = document.querySelector(sel);
     if (!el) return false;
     el.focus();
@@ -170,7 +310,6 @@ export async function chat(message, options = {}) {
         el.value = text;
       }
     } else {
-      // contenteditable / ProseMirror：先选中元素内容再插入
       try {
         const r = document.createRange();
         r.selectNodeContents(el);
@@ -183,34 +322,26 @@ export async function chat(message, options = {}) {
       }
     }
     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    return true;
-  }, inputSelector, message);
-
-  // 若 evaluate 未生效（ProseMirror 可能拦截），回退到 page.type
-  const hasContent = await page.evaluate((sel) => {
-    const el = document.querySelector(sel);
-    if (!el) return false;
     const v = el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : (el.textContent || el.innerText || '');
     return v.length > 10;
-  }, inputSelector);
+  }, inputSelector, message);
 
-  if (!hasContent) {
+  if (!filled) {
     await page.evaluate((sel) => {
       const el = document.querySelector(sel);
       if (el) el.textContent = '';
     }, inputSelector);
-    await page.type(inputSelector, message, { delay: 20 });
+    await page.type(inputSelector, message, { delay: 0 });
   }
 
-  // 等待 React 状态更新后再点击发送
   await new Promise(r => setTimeout(r, 300));
 
-  // 查找发送按钮并点击
-  const sendSelector = await findFirst(page, SELECTORS.sendButton);
+  const sendSelector = await waitForSelector(page, SELECTORS.sendButton, waitOpts);
   if (!sendSelector) throw new Error('Send button not found');
 
-  // 发送前记录最后一条回复内容，用于判断是否收到新回复（避免延迟一回合）
+  // 发送前记录最后一条回复内容与条数，用于判断是否收到新回复
   const prevLastText = await getLastReplyText(page);
+  const prevCount = await getReplyCount(page);
   await page.click(sendSelector);
 
   const start = Date.now();
@@ -220,16 +351,26 @@ export async function chat(message, options = {}) {
 
   while (Date.now() - start < pollTimeoutMs) {
     await new Promise(r => setTimeout(r, pollIntervalMs));
+    const cfCheck = await checkCloudflareBlock(page);
+    if (cfCheck.blocked) {
+      await disconnectBrowser();
+      throw new Error(
+        `CF_BLOCKED:Edge IP Restricted (1034)\n` +
+        `IP: ${cfCheck.ip} 被 Cloudflare 限制访问 chatgpt.com\n` +
+        `Ray ID: ${cfCheck.rayId}\n` +
+        `解决方法：更换网络/代理，或等待 IP 解封`
+      );
+    }
+    const count = await getReplyCount(page);
     const text = await getLastReplyText(page);
     if (!text || text.length < 2) continue;
 
-    // 必须与发送前不同，才是新回复
-    if (text === prevLastText) continue;
+    // count 增加或文本变化，才算新回复
+    if (count <= prevCount && text === prevLastText) continue;
 
     if (text === lastText) {
       stableCount++;
       if (stableCount >= STABLE_POLLS) {
-        await browser.disconnect();
         return { text, raw: text };
       }
     } else {
@@ -238,7 +379,6 @@ export async function chat(message, options = {}) {
     }
   }
 
-  await browser.disconnect();
   if (lastText) return { text: lastText, raw: lastText };
   throw new Error('Reply timeout');
 }
@@ -256,6 +396,18 @@ async function findFirst(page, selectors) {
   return null;
 }
 
+async function waitForSelector(page, selectors, options = {}) {
+  const timeout = options.timeout ?? 15000;
+  const interval = options.interval ?? 500;
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const sel = await findFirst(page, selectors);
+    if (sel) return sel;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  return null;
+}
+
 async function getReplyCount(page) {
   return await page.evaluate(() => {
     let els = document.querySelectorAll('[data-message-author-role="assistant"]');
@@ -268,7 +420,10 @@ async function getReplyCount(page) {
 async function getLastReplyText(page) {
   return await page.evaluate(() => {
     const getText = (el) => (el?.innerText || el?.textContent || '').trim();
-    const isPromptLike = (t) => !t || (t.startsWith('规则：') && t.length < 200) || (t.startsWith('<available_tools>') && !t.includes('?') && !t.includes('!'));
+    const isPromptLike = (t) =>
+      !t ||
+      (t.includes('<tool>') && !t.includes('?') && t.length < 500) ||
+      (t.includes('<available_tools>') && t.length < 300);
 
     // 策略 1: 取最后一条 assistant 消息
     let els = document.querySelectorAll('[data-message-author-role="assistant"]');

@@ -3,6 +3,8 @@
  */
 import * as chatgptWeb from './chatgpt-web-client.js';
 import { processLlmOutput } from './router.js';
+import { runVerifyLoop } from './agent/verifyLoop.js';
+import { runIntentLoop } from './agent/intentLoop.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -23,40 +25,81 @@ name: list_dir
 args: {"path":"C:\\\\Users"}
 </tool>
 
-run_command: use script for PowerShell. MUST use \\n between statements. SendKeys does NOT support Chinese - use Set-Content + Start-Process.
+run_command: use script for PowerShell. MUST use \\n between statements.
+Execution rules: (1) NEVER call interactive programs (notepad, mspaint) in script - they block. Use separate run_command with command: "start notepad path" after file exists. (2) Invoke-WebRequest MUST use -TimeoutSec and try/catch; output SUCCESS:path or FAILED:message for verification.
 <tool>
 name: run_command
-args: {"script":"Set-Content -Path \"$env:USERPROFILE\\Desktop\\你好.txt\" -Value '你好' -Encoding UTF8\\nStart-Process notepad \"$env:USERPROFILE\\Desktop\\你好.txt\""}
+args: {"script":"$p = \\"$env:USERPROFILE\\\\Desktop\\\\news.txt\\"\\ntry { Invoke-WebRequest -Uri 'https://...' -TimeoutSec 10 | % { $_.Content | Out-File $p -Encoding UTF8 }; Write-Output SUCCESS:$p } catch { Write-Output FAILED:$($_.Exception.Message) }"}
 </tool>
-Rule: script must have \\n (backslash-n) between lines. Example: "line1\\nline2\\nline3". For Chinese: Set-Content then Start-Process.
+Then open file: <tool>name: run_command args: {"command":"start notepad \\"%USERPROFILE%\\\\Desktop\\\\news.txt\\""}</tool>
+
+PowerShell: Paths with $env: use double quotes. Single quotes block expansion. Script outputs SUCCESS or FAILED prefix.
+
+Termination: FAILED or 404 three times -> stop. Do not guess URLs. read_file path supports $env:USERPROFILE.
 
 Tools: open_notepad, open_cmd, list_dir, read_file, sys_info, run_command(args.script or args.command)
 Output only the tool block. No explanation.`;
 
+const VALID_MODES = ['intent', 'verify', 'single'];
+
+let _config = null;
 function loadConfig() {
-  const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-  return JSON.parse(raw);
+  if (_config) return _config;
+  try {
+    _config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+  } catch (e) {
+    throw new Error('config.json 读取失败: ' + e.message);
+  }
+  return _config;
 }
 
+const chatOpts = (cdp) => ({
+  cdpUrl: cdp.url ?? 'http://127.0.0.1:9222',
+  chatgptUrl: cdp.chatgptUrl ?? 'https://chatgpt.com/',
+  pollIntervalMs: cdp.replyPollIntervalMs ?? 500,
+  pollTimeoutMs: cdp.replyPollTimeoutMs ?? 120000,
+  pageReadyTimeoutMs: cdp.pageReadyTimeoutMs ?? 15000,
+});
+
 export default {
-  async chat(userInput) {
+  async chat(userInput, options = {}) {
     const config = loadConfig();
     const cdp = config?.llm?.cdp ?? {};
-    const text = TOOL_PROMPT + '\n\nUser: ' + userInput;
+    const mode = options.mode ?? config?.agent?.mode ?? 'intent';
 
-    const result = await chatgptWeb.chat(text, {
-      cdpUrl: cdp.url ?? 'http://127.0.0.1:9222',
-      chatgptUrl: cdp.chatgptUrl ?? 'https://chatgpt.com/',
-      pollIntervalMs: cdp.replyPollIntervalMs ?? 500,
-      pollTimeoutMs: cdp.replyPollTimeoutMs ?? 120000,
-    });
-
-    const llm_output = result?.text || '';
-    const out = await processLlmOutput(llm_output);
-
-    if (out.error && out.error === 'no tool') {
-      return { ok: false, error: out.error, raw: llm_output };
+    if (!VALID_MODES.includes(mode)) {
+      throw new Error(`未知 agent mode: ${mode}`);
     }
-    return out;
+
+    try {
+      if (mode === 'intent') {
+        return await runIntentLoop(userInput, { cdp, newChat: options.newChat });
+      }
+      if (mode === 'verify') {
+        return await runVerifyLoop(userInput, { cdp, newChat: options.newChat });
+      }
+
+      const text = TOOL_PROMPT + '\n\nUser: ' + userInput;
+      const result = await chatgptWeb.chat(text, { ...chatOpts(cdp), newChat: options.newChat ?? false });
+      const llm_output = result?.text || '';
+      const out = await processLlmOutput(llm_output);
+
+      if (out.error && out.error === 'no tool') {
+        if ((llm_output || '').trim().length > 50) {
+          return { ok: true, result: llm_output };
+        }
+        return { ok: false, error: out.error, raw: llm_output };
+      }
+      return out;
+    } catch (e) {
+      if (e.message?.startsWith('CF_BLOCKED')) {
+        return {
+          ok: false,
+          error: e.message.replace('CF_BLOCKED:', '').trim(),
+          code: 'CF_BLOCKED',
+        };
+      }
+      throw e;
+    }
   },
 };

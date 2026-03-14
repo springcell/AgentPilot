@@ -3,10 +3,14 @@
  */
 import os from 'os';
 
+const PLATFORM_NAMES = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
+
 export async function systemInfo() {
+  const platform = os.platform();
   return {
-    platform: os.platform(),
+    platform,
+    platformName: PLATFORM_NAMES[platform] ?? platform,
     cpu: os.cpus().length,
-    memory: os.totalmem(),
+    memory: Math.round(os.totalmem() / 1024 / 1024) + ' MB',
   };
 }
