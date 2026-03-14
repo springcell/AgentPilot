@@ -26,36 +26,46 @@ function loadAgentConfig() {
   }
 }
 
+function tryParseJSON(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {}
+
+  const repaired = raw
+    .replace(/"command"\s*:\s*"powershell([^"]*?) -Command "([^"]*?)""/g, (_, a, b) =>
+      `"command":"powershell${a} -Command \\"${b}\\""`
+    )
+    .replace(/"command"\s*:\s*"tasklist \/FI "([^"]*?)""/g, (_, a) =>
+      `"command":"tasklist /FI \\"${a}\\""`
+    );
+
+  try {
+    return JSON.parse(repaired);
+  } catch (_) {
+    return null;
+  }
+}
+
 function parseJSON(text) {
   if (!text || typeof text !== 'string') return null;
   const raw = text.trim();
 
   const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) {
-    try {
-      return JSON.parse(fenceMatch[1].trim());
-    } catch (_) {}
-  }
+  if (fenceMatch) return tryParseJSON(fenceMatch[1].trim());
+
   const jsonLabelMatch = raw.match(/JSON\s*\n(\{[\s\S]*\})/);
-  if (jsonLabelMatch) {
-    try {
-      return JSON.parse(jsonLabelMatch[1].trim());
-    } catch (_) {}
-  }
+  if (jsonLabelMatch) return tryParseJSON(jsonLabelMatch[1].trim());
+
   const bareMatch = raw.match(/\{[\s\S]*?"(?:actions|passed|isDependencyIssue)"[\s\S]*\}/);
-  if (bareMatch) {
-    try {
-      return JSON.parse(bareMatch[0].trim());
-    } catch (_) {}
-  }
-  // 尝试从第一个 { 开始提取，支持截断 JSON 自动补全
+  if (bareMatch) return tryParseJSON(bareMatch[0].trim());
+
   const startIdx = raw.indexOf('{');
   if (startIdx >= 0) {
     let depth = 0;
     let inString = false;
     let escape = false;
     let endIdx = -1;
-    const q = raw[startIdx];
     for (let i = startIdx; i < raw.length; i++) {
       const c = raw[i];
       if (escape) {
@@ -67,14 +77,11 @@ function parseJSON(text) {
         continue;
       }
       if (inString) {
-        if (c === q) inString = false;
+        if (c === '"' || c === "'") inString = false;
         continue;
       }
-      if (c === '"' || c === "'") {
-        inString = true;
-        continue;
-      }
-      if (c === '{' || c === '[') depth++;
+      if (c === '"' || c === "'") inString = true;
+      else if (c === '{' || c === '[') depth++;
       else if (c === '}' || c === ']') {
         depth--;
         if (depth === 0) {
@@ -83,17 +90,11 @@ function parseJSON(text) {
         }
       }
     }
-    if (endIdx >= 0) {
-      try {
-        return JSON.parse(raw.slice(startIdx, endIdx + 1));
-      } catch (_) {}
-    }
-    // 截断时尝试补全
+    if (endIdx >= 0) return tryParseJSON(raw.slice(startIdx, endIdx + 1));
     let candidate = raw.slice(startIdx);
     for (const suffix of ['}', ']}', ']}]}', '}]}']) {
-      try {
-        return JSON.parse(candidate + suffix);
-      } catch (_) {}
+      const parsed = tryParseJSON(candidate + suffix);
+      if (parsed) return parsed;
     }
   }
   return null;
