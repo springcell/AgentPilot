@@ -106,6 +106,42 @@ async function executeTool(toolName, args) {
   return { ok: !out.error, result: out.result, error: out.error };
 }
 
+async function executeWithErrorHandling(action) {
+  try {
+    const result = await executeTool(action.tool, action.args);
+    if (!result.ok) throw new Error(result.error);
+    return result;
+  } catch (error) {
+    return { ok: false, error: error?.message ?? String(error) };
+  }
+}
+
+async function requestPermissionForAction(action) {
+  const confirmed = await askUserConfirm('该操作需要管理员权限，是否同意授权？');
+  if (confirmed) {
+    return await executeWithErrorHandling(action);
+  }
+  return { ok: false, error: '用户拒绝授权，操作无法执行。' };
+}
+
+function getAlternativeAction(action) {
+  const fb = action.fallback?.[0];
+  return fb ? { tool: fb.tool, args: fb.args } : null;
+}
+
+async function handleExecutionError(error, action) {
+  const errStr = typeof error === 'string' ? error : error?.message ?? String(error ?? '');
+  if (errStr.includes('权限不足')) {
+    return await requestPermissionForAction(action);
+  }
+  const alternativeAction = getAlternativeAction(action);
+  if (alternativeAction) {
+    const out = await executeWithErrorHandling(alternativeAction);
+    return out.ok ? { ...out, usedFallback: true } : out;
+  }
+  return { ok: false, error: errStr };
+}
+
 async function executeWithFallback(action) {
   const out = await executeTool(action.tool, action.args);
   if (out.ok) return out;
@@ -147,14 +183,62 @@ async function callAgent(agentName, message, cdpOpts, isFirst = false) {
 }
 
 function buildExtractorPrompt(userGoal, thinkText, extraHint = '') {
-  return [
-    `用户目标：${userGoal}`,
-    `AI分析：${thinkText}`,
-    '请提取JSON：',
-    extraHint,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  return `
+用户目标：${userGoal}
+
+AI分析：${thinkText}
+
+你是JSON提取器。重要：只输出合法 JSON，不要输出解释文字，不要输出 markdown 代码块。
+
+每个 action 必须包含 fallback 数组，提供 2-3 个备选方案。
+
+Windows 命令规则：
+1. 简单命令优先直接使用 cmd 可执行命令，例如：
+   notepad, calc, tasklist, dir, winget, start
+2. 仅当需要 PowerShell 专属语法时，才显式调用：
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "..."
+3. 主 action、fallback、verify 中的所有 command 字符串都必须符合 JSON 语法；
+   如果包含双引号，必须转义为 \\"
+4. 不要直接输出裸 PowerShell 命令，例如：
+   Get-WmiObject、Get-ChildItem、Get-Content、$env:...
+5. 查询已安装软件时，不要优先使用：
+   Get-WmiObject -Class Win32_Product
+6. 查询已安装软件时优先级：
+   注册表卸载项 > winget > wmic(仅最后兜底)
+
+格式：
+{
+  "answer": "自然语言回答（可选）",
+  "actions": [
+    {
+      "tool": "工具名",
+      "args": {},
+      "fallback": [
+        {"tool": "工具名", "args": {}},
+        {"tool": "工具名", "args": {}}
+      ]
+    }
+  ],
+  "verify": {"tool": "验收工具", "args": {}, "expect": "期望字符串"}
+}
+
+可用工具:
+write_file, read_file, list_dir, run_command, open_notepad, open_cmd, sys_info, confirm(args.message)
+
+错误示例：
+"command": "powershell -Command "Start-Process notepad""
+
+正确示例：
+"command": "powershell -Command \\"Start-Process notepad\\""
+
+错误示例：
+"command": "tasklist /FI "IMAGENAME eq notepad.exe""
+
+正确示例：
+"command": "tasklist /FI \\"IMAGENAME eq notepad.exe\\""
+
+${extraHint}
+`.trim();
 }
 
 const USER_RESULT_MAX_LEN = 7000;
@@ -182,6 +266,10 @@ function buildUserResult(intent, verdict, actionResults) {
 
 async function executeActionWithInstaller(action, baseChatOpts) {
   let out = await executeWithFallback(action);
+  if (!out.ok) {
+    const permissionRetry = await handleExecutionError(out.error, action);
+    if (permissionRetry.ok) out = permissionRetry;
+  }
   if (!out.ok) {
     console.log('[Installer] 检查是否依赖问题...');
     const installRes = await callAgent(
