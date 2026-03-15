@@ -2,6 +2,8 @@
 
 用 ChatGPT 网页版驱动本地对话与任务执行的超轻量智能体，无需 API Key，无限随意使用！
 
+**AgentPilot Studio** — A lightweight AI agent powered by ChatGPT web. No API, no token limits, unlimited use. It can write code, find files, and much more; explore what you can do with it.
+
 ---
 
 ## 环境要求
