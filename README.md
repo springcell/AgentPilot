@@ -1,6 +1,6 @@
 # AgentPilot
 
-用 ChatGPT 网页版驱动本地对话与任务执行，无需 API Key。
+用 ChatGPT 网页版驱动本地对话与任务执行的超轻量智能体，无需 API Key，无限随意使用！
 
 ---
 
