@@ -2,6 +2,8 @@
 
 Drive local chat and task execution via ChatGPT web — **no API key, no token limits, unlimited use.**
 
+**AgentPilot** — A lightweight AI agent powered by ChatGPT web. No API, no token limits, unlimited use. It can write code, find files, and much more; explore what you can do with it.
+
 ---
 
 ## Requirements
