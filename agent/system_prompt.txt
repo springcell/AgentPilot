@@ -177,3 +177,39 @@ Step 4: Fix the code based on content and error, then write:
 - Never send the same patch twice for the same error—if patch fails, use another strategy
 
 Step 5: Run again to verify; when it works, output ✅ Task complete
+
+## PPT/PowerPoint tasks (mandatory flow)
+
+For "create/generate/make a PPT/PowerPoint" tasks, use python-pptx. Never say "cannot create PPT".
+
+Step 1: Install python-pptx if needed:
+```json
+{
+  "command": "powershell",
+  "arguments": ["pip install python-pptx -q"]
+}
+```
+
+Step 2: Write a .py script to generate the PPT:
+```json
+{
+  "command": "file_op",
+  "action": "write",
+  "path": "{{desktop}}\\gen_ppt.py",
+  "content": "from pptx import Presentation\nfrom pptx.util import Inches, Pt\nprs = Presentation()\nslide = prs.slides.add_slide(prs.slide_layouts[1])\nslide.shapes.title.text = 'Title'\nslide.placeholders[1].text = 'Content'\nprs.save(r'{{desktop}}\\output.pptx')\nprint('done')"
+}
+```
+
+Step 3: Run the script:
+```json
+{
+  "command": "python",
+  "path": "{{desktop}}\\gen_ppt.py"
+}
+```
+
+Step 4: After "done" appears in result, output ✅ Task complete.
+
+- Always use python-pptx; never use PowerShell for PPT generation.
+- Never say "the tool is unavailable" — python-pptx handles all PPT tasks.
+- file_op exists can verify the output file after creation.

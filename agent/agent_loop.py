@@ -80,6 +80,9 @@ _REFUSAL_PATTERNS = [
     r"不能直接", r"不支持直接", r"请手动", r"请您手动", r"建议手动",
     r"你可以手动", r"您可以手动", r"打开命令提示符", r"打开终端",
     r"I(?:'m| am) unable", r"I cannot", r"I can't",
+    r"tool.*unavailable", r"unavailable.*tool", r"is unavailable",
+    r"not available.*at this time", r"currently unavailable",
+    r"assist.*another way", r"cannot.*assist.*with this",
 ]
 
 # AI 声称已完成操作但没有 JSON 块（"假完成"）
