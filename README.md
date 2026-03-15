@@ -7,6 +7,7 @@
 ---
 
 ## 环境要求
+  Python 3 · 运行智能体（如 agent_loop.py、executor）需要。可从 python.org 下载，或用 winget install Python.Python.3.12 安装。
 
 - **Node.js 18+** · [官网下载](https://nodejs.org/) 或命令行：
   ```powershell
