@@ -58,6 +58,28 @@ Error: AgentPilot request failed (500): {"ok":false,"error":"Protocol error: Con
 ```
 The CDP connection to Chrome is gone. Run `npm run chrome` (or `npm run run`) again so Chrome starts with the debug port, then confirm you are logged in at https://chatgpt.com/ before using the agent.
 
+## Resolving branch conflicts
+
+When `git pull origin master` (or your branch) reports conflicts:
+
+1. **Option A — keep your local changes and replay on top of remote**
+   ```bash
+   git stash
+   git pull origin master
+   git stash pop
+   ```
+   Then fix any files that show `<<<<<<<`, `=======`, `>>>>>>>` (keep the version you want and remove the markers), `git add` those files, and `git commit` if needed.
+
+2. **Option B — commit first, then pull with rebase**
+   ```bash
+   git add -A
+   git commit -m "your message"
+   git pull --rebase origin master
+   ```
+   If conflicts appear, resolve them in the listed files, then `git add <file>` and `git rebase --continue`. If you want to abort: `git rebase --abort`.
+
+3. **After resolving**, push: `git push origin master` (or your branch name).
+
 ## Roadmap
 
 - [ ] IDE integration for API (e.g. Cursor)

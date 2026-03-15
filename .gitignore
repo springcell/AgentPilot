@@ -7,3 +7,6 @@ write_debug.log
 .env
 .DS_Store
 /Test
+__pycache__/
+*.pyc
+.claude/settings.local.json

@@ -187,6 +187,53 @@ def format_result_for_ai(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def auto_verify_py(path: str, timeout: int = 15) -> str:
+    """
+    Re-run a .py file after a fix attempt.
+    Returns a feedback string to append to the AI message.
+    """
+    if not path or not path.endswith(".py") or not os.path.isfile(path):
+        return ""
+    try:
+        proc = subprocess.run(
+            [sys.executable, path],
+            capture_output=True, text=True, timeout=timeout,
+            encoding=_get_output_encoding(), errors="replace",
+            cwd=os.path.dirname(path),
+        )
+        if proc.returncode == 0:
+            return f"\n[Auto-verify] Re-run {path} ✅ No errors"
+        else:
+            err = proc.stderr.strip()
+            lines = err.splitlines()[:30]
+            return (
+                f"\n[Auto-verify] Re-run {path} ❌ Still failing\n"
+                + "\n".join(lines)
+            )
+    except subprocess.TimeoutExpired:
+        return f"\n[Auto-verify] Re-run {path} timed out"
+    except Exception as e:
+        return f"\n[Auto-verify] Re-run {path} error: {e}"
+
+
+def _extract_py_targets(blocks: list[dict]) -> list[str]:
+    """Extract .py file paths that were written or patched (candidates for auto-verify)."""
+    targets = []
+    seen = set()
+    for b in blocks:
+        cmd = b.get("command", "")
+        action = b.get("action", "")
+        path = ""
+        if cmd == "file_op" and action in ("write", "patch", "delete_lines", "insert_lines"):
+            path = b.get("path", "")
+        elif cmd in ("python", "python3"):
+            path = b.get("path", "")
+        if path and path.endswith(".py") and path not in seen:
+            seen.add(path)
+            targets.append(path)
+    return targets
+
+
 def run_from_text(ai_response: str, verbose: bool = True) -> tuple[list, str]:
     """Extract from AI response -> execute -> return result."""
     pr = parse(ai_response)

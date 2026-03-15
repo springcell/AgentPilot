@@ -169,7 +169,27 @@ def _infer_patterns(task_text: str, skill_name: str) -> list[str]:
         if w_lower not in ('the', 'and', 'for', 'with', 'that', 'this',
                            '任务', '帮我', '我需要', '请帮', '文件', '路径'):
             patterns.add(w_lower)
-    return list(patterns)[:8]
+    # 过滤乱码 pattern（非ASCII率超过50%则丢弃）
+    clean = []
+    for p in patterns:
+        non_ascii = sum(1 for c in p if ord(c) > 127)
+        if len(p) == 0 or non_ascii / len(p) > 0.5:
+            continue
+        clean.append(p)
+    return clean[:8]
+
+
+def _is_valid_skill(skill: dict) -> bool:
+    """检查 skill 是否有效（无乱码、有基本字段）"""
+    desc = skill.get("description", "")
+    name = skill.get("name", "")
+    if not name or not desc:
+        return False
+    for text in (desc, name):
+        non_ascii = sum(1 for c in text if ord(c) > 127)
+        if len(text) > 0 and non_ascii / len(text) > 0.5:
+            return False
+    return True
 
 
 def _extract_steps(executed_blocks: list[dict]) -> list[dict]:
@@ -217,10 +237,13 @@ def save_skill_from_success(
         return ""
 
     name = _infer_skill_name(task_text)
+    # 名称本身乱码则不保存
+    if not name or sum(1 for c in name if ord(c) > 127) / max(len(name), 1) > 0.3:
+        return ""
+
     existing = _load_skill(name)
 
     if existing:
-        # 更新已有 skill：步骤以本次为准（最新的成功经验），计数+1
         existing["steps"] = _extract_steps(executed_blocks)
         existing["success_count"] = existing.get("success_count", 1) + 1
         existing["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M")

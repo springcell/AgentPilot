@@ -29,6 +29,25 @@ def _read_text(path: str) -> str:
     return Path(path).read_bytes().decode("utf-8", errors="replace")
 
 
+_BINARY_EXTENSIONS = {
+    ".pptx", ".ppt", ".xlsx", ".xls", ".docx", ".doc",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tiff",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
+    ".zip", ".rar", ".7z", ".gz", ".exe", ".dll", ".so", ".pdf",
+}
+
+
+def _is_binary_file(path: str) -> bool:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _BINARY_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(512)
+    except Exception:
+        return False
+
+
 def _write_text(path: str, content: str, encoding: str = "utf-8") -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -91,25 +110,84 @@ def _op_find(params: dict) -> dict:
 
 
 def _op_read(params: dict) -> dict:
-    """读取文件内容，支持行范围截取。"""
+    """读取文件内容，支持行范围截取。二进制文件返回元数据摘要。"""
     path = _expand(params.get("path", ""))
     if not os.path.isfile(path):
         return {"ok": False, "error": f"File not found: {path}"}
 
+    if _is_binary_file(path):
+        ext = os.path.splitext(path)[1].lower()
+        size = os.path.getsize(path)
+        summary = f"[Binary file: {ext}, size={size} bytes, path={path}]"
+
+        if ext in (".pptx", ".ppt"):
+            try:
+                from pptx import Presentation
+                prs = Presentation(path)
+                texts = []
+                for i, slide in enumerate(prs.slides, 1):
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            texts.append(f"Slide {i}: {shape.text.strip()[:200]}")
+                summary = (
+                    f"[PPTX: {len(prs.slides)} slides, path={path}]\n"
+                    + "\n".join(texts[:30])
+                )
+            except ImportError:
+                summary += "\n(pip install python-pptx to read content)"
+            except Exception as e:
+                summary += f"\n(Could not parse: {e})"
+
+        elif ext in (".xlsx", ".xls"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+                lines = []
+                for sheet in wb.sheetnames[:3]:
+                    ws = wb[sheet]
+                    lines.append(f"Sheet: {sheet}")
+                    for row in list(ws.iter_rows(values_only=True))[:10]:
+                        lines.append("  " + str(row))
+                summary = f"[XLSX: {len(wb.sheetnames)} sheet(s), path={path}]\n" + "\n".join(lines)
+            except ImportError:
+                summary += "\n(pip install openpyxl to read content)"
+            except Exception as e:
+                summary += f"\n(Could not parse: {e})"
+
+        elif ext in (".docx", ".doc"):
+            try:
+                import docx
+                doc = docx.Document(path)
+                paras = [p.text for p in doc.paragraphs if p.text.strip()][:20]
+                summary = f"[DOCX: {len(doc.paragraphs)} paragraphs, path={path}]\n" + "\n".join(paras)
+            except ImportError:
+                summary += "\n(pip install python-docx to read content)"
+            except Exception as e:
+                summary += f"\n(Could not parse: {e})"
+
+        return {
+            "ok": True,
+            "path": path,
+            "binary": True,
+            "total_lines": 0,
+            "shown_lines": "0-0",
+            "content": summary,
+        }
+
     content = _read_text(path)
     lines   = content.splitlines()
-
-    start = params.get("line_start", 1) - 1       # 1-based → 0-based
+    start = params.get("line_start", 1) - 1
     end   = params.get("line_end", len(lines))
     snippet = "\n".join(lines[start:end])
-
     return {
         "ok": True,
         "path": path,
+        "binary": False,
         "total_lines": len(lines),
         "shown_lines": f"{start+1}-{min(end, len(lines))}",
         "content": snippet,
     }
+
 
 
 def _op_write(params: dict) -> dict:
