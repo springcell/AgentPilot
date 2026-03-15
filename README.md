@@ -14,6 +14,7 @@ Drive local chat and task execution via ChatGPT web — **no API key, no token l
   # If terminal cannot find npm, run first:
   $env:Path = "C:\Program Files\nodejs;" + $env:Path
   ```
+- **Python 3** · Required for the agent (e.g. `agent_loop.py`, executor). [Download](https://www.python.org/downloads/) or `winget install Python.Python.3.12`.
 - **Chrome** browser
 - **Windows** (PowerShell)
 
