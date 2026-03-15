@@ -6,3 +6,4 @@ logs/
 write_debug.log
 .env
 .DS_Store
+/Test
