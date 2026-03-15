@@ -321,6 +321,11 @@ async function doChat(message, options = {}) {
   const sendSelector = await waitForSelector(page, SELECTORS.sendButton, waitOpts);
   if (!sendSelector) throw new Error('Send button not found');
 
+  // Wait for send button to become enabled (ChatGPT disables it while generating)
+  const SEND_READY_TIMEOUT = 60000;
+  const sendReady = await waitForSendButtonEnabled(page, sendSelector, SEND_READY_TIMEOUT);
+  if (!sendReady) throw new Error('Send button not found');
+
   const prevLastText = await getLastReplyText(page);
   const prevCount = await getReplyCount(page);
   await page.click(sendSelector);
@@ -400,6 +405,23 @@ async function waitForSelector(page, selectors, options = {}) {
     await new Promise(r => setTimeout(r, interval));
   }
   return null;
+}
+
+async function waitForSendButtonEnabled(page, selector, timeout = 60000) {
+  const interval = 500;
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const enabled = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      return !el.disabled && !el.hasAttribute('disabled')
+        && getComputedStyle(el).pointerEvents !== 'none'
+        && !el.closest('[aria-disabled="true"]');
+    }, selector);
+    if (enabled) return true;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  return false;
 }
 
 async function getReplyCount(page) {
