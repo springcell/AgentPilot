@@ -47,6 +47,10 @@ def build_command(block: dict) -> Optional[list[str]]:
         return ["cmd", "/c", script]
 
     elif cmd in ("python", "python3"):
+        # 支持 "path" 字段直接运行 .py 文件
+        path = block.get("path", "")
+        if path:
+            return [sys.executable, path]
         script = "\n".join(args) if isinstance(args, list) else args
         return [sys.executable, "-c", script]
 
@@ -118,7 +122,23 @@ def execute_block(block: dict, timeout: int = 60) -> dict:
     if cmd == "file_op":
         action = block.get("action", "")
         params = {k: v for k, v in block.items() if k not in ("command", "action")}
+        # 打印执行摘要
+        summary_parts = [f"file_op:{action}"]
+        for key in ("path", "src", "dst", "name", "pattern"):
+            if key in params:
+                summary_parts.append(f"{key}={params[key]}")
+        print(f"   ⚙️  {' | '.join(summary_parts)}")
         r = file_op_run(action, params)
+        if r.get("ok"):
+            # 成功时打印关键结果字段
+            info_parts = []
+            for key in ("count", "total_lines", "bytes", "replaced", "inserted_lines",
+                        "deleted_lines", "status", "message"):
+                if key in r:
+                    info_parts.append(f"{key}={r[key]}")
+            print(f"   ✅ 成功" + (f" ({', '.join(info_parts)})" if info_parts else ""))
+        else:
+            print(f"   ❌ 失败: {r.get('error', '未知错误')}")
         result["success"] = r.get("ok", False)
         result["stdout"] = _fmt_file_op(action, r)
         result["stderr"] = r.get("error", "") if not r.get("ok") else ""

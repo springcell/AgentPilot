@@ -1,4 +1,4 @@
-# Expose local API via ngrok for Cursor
+﻿# Expose local API via ngrok for Cursor
 # Cursor routes requests through api2.cursor.sh, so Base URL must be publicly accessible
 # Put ngrok.exe in project root or ngrok/ folder
 

@@ -1,4 +1,4 @@
-# 检查 CDP 连接状态
+﻿# 检查 CDP 连接状态
 param([string]$url = "http://127.0.0.1:9222")
 
 try {

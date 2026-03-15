@@ -1,4 +1,4 @@
-# 运行 Python 智能体：自动检测并启动桥接 API（若未运行）
+﻿# 运行 Python 智能体：自动检测并启动桥接 API（若未运行）
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$Task = @()

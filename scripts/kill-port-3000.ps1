@@ -1,4 +1,4 @@
-# Kill process on port 3000
+﻿# Kill process on port 3000
 $port = 3000
 $conn = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
 if (-not $conn) {

@@ -1,4 +1,4 @@
-# Launch Chrome with CDP debug port
+﻿# Launch Chrome with CDP debug port
 # Uses separate user-data-dir to avoid conflict with existing Chrome
 
 param(
