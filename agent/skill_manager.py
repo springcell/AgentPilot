@@ -1,8 +1,8 @@
 """
-skill_manager.py — 智能体经验库
+skill_manager.py — Agent skill store
 
-每次任务成功后自动保存执行过程中的 JSON 指令序列，
-下次遇到相似任务时将成功经验注入 prompt，减少试错。
+After each successful task, save the JSON instruction sequence;
+inject into prompt for similar tasks to reduce trial and error.
 
 Skill 文件格式（JSON）：
 {
@@ -107,17 +107,17 @@ def skills_to_prompt(task_text: str) -> str:
     if not skills:
         return ""
 
-    lines = ["## 历史成功经验（请优先参考以下步骤，已验证可用）\n"]
+    lines = ["## Historical success (follow these steps first; verified)\n"]
     for s in skills:
         lines.append(f"### [{s['name']}] {s['description']}")
-        lines.append(f"适用场景: {', '.join(s.get('patterns', []))}")
+        lines.append(f"Use when: {', '.join(s.get('patterns', []))}")
         if s.get("notes"):
-            lines.append(f"注意: {s['notes']}")
-        lines.append("成功步骤序列:")
+            lines.append(f"Note: {s['notes']}")
+        lines.append("Steps:")
         for i, step in enumerate(s.get("steps", []), 1):
             step_clean = {k: v for k, v in step.items()}
-            lines.append(f"  步骤{i}: {json.dumps(step_clean, ensure_ascii=False)}")
-        lines.append(f"（已成功执行 {s.get('success_count', 1)} 次，最近: {s.get('last_used', '')}）\n")
+            lines.append(f"  Step {i}: {json.dumps(step_clean, ensure_ascii=False)}")
+        lines.append(f"(Used {s.get('success_count', 1)} time(s), last: {s.get('last_used', '')})\n")
 
     return "\n".join(lines)
 

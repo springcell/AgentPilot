@@ -1,6 +1,6 @@
 """
-env_context.py — 本地环境采集模块
-启动时采集真实路径，注入给 AI，避免猜路径。
+env_context.py — Local environment collection
+Collect real paths at startup and inject for AI so it does not guess paths.
 """
 import os
 import sys
@@ -61,7 +61,7 @@ def collect() -> dict:
         "python": sys.version.split()[0],
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "date": datetime.now().strftime("%Y-%m-%d"),
-        "weekday": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()],
+        "weekday": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][datetime.now().weekday()],
         "desktop_dirs": [],
     }
     try:
@@ -75,23 +75,23 @@ def collect() -> dict:
 
 
 def inject_env_vars(info: dict) -> None:
-    """将采集的路径注入 os.environ，供 file_ops 的 expandvars 使用"""
+    """Inject collected paths into os.environ for file_ops expandvars."""
     os.environ["DESKTOP"] = info.get("desktop", "")
     os.environ["DOCUMENTS"] = info.get("documents", "")
 
 
 def to_prompt_block(info: dict) -> str:
-    dirs = "、".join(info["desktop_dirs"]) if info["desktop_dirs"] else "（空）"
-    od = f"\n- OneDrive路径: {info['onedrive']}" if info["onedrive"] else ""
+    dirs = ", ".join(info["desktop_dirs"]) if info["desktop_dirs"] else "(none)"
+    od = f"\n- OneDrive: {info['onedrive']}" if info["onedrive"] else ""
     return f"""
-## 本机环境（已采集，请直接使用这些路径，勿自行猜测）
+## Local environment (use these paths; do not guess)
 
-- 用户名:     {info['username']}
-- 桌面路径:   {info['desktop']}
-- 文档路径:   {info['documents']}
-- 下载路径:   {info['downloads']}
-- TEMP路径:   {info['temp']}{od}
-- 当前日期:   {info['date']} {info['weekday']}  {info['datetime']}
-- 系统:       {info['os']}
-- 桌面已有目录: {dirs}
+- Username:   {info['username']}
+- Desktop:    {info['desktop']}
+- Documents:  {info['documents']}
+- Downloads:  {info['downloads']}
+- TEMP:       {info['temp']}{od}
+- Date:       {info['date']} {info['weekday']}  {info['datetime']}
+- OS:         {info['os']}
+- Desktop dirs: {dirs}
 """

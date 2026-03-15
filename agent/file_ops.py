@@ -1,23 +1,7 @@
 """
-file_ops.py — 文件操作模块
-AI 通过 JSON 指令调用，支持遍历、读取、写入、修改、复制、移动等复杂操作。
-
-支持的 action：
-  list        列出目录内容
-  find        按模式递归搜索文件
-  read        读取文件内容
-  write       写入/覆盖文件（自动创建目录）
-  append      追加内容到文件末尾
-  patch       在文件中替换指定字符串（支持多处替换）
-  insert      在指定行号前/后插入内容
-  delete_lines 删除指定行范围
-  mkdir       创建目录
-  copy        复制文件或目录
-  move        移动/重命名文件或目录
-  delete      删除文件或目录
-  exists      检查路径是否存在
-  stat        获取文件元信息（大小、修改时间等）
-  tree        递归输出目录树结构
+file_ops.py — File operations module
+AI invokes via JSON: list, find, read, write, append, patch, insert, delete_lines,
+mkdir, copy, move, delete, exists, stat, tree, find_program, launch.
 """
 
 import os
@@ -57,7 +41,7 @@ def _op_list(params: dict) -> dict:
     """列出目录内容（非递归）。"""
     path = _expand(params.get("path", "."))
     if not os.path.isdir(path):
-        return {"ok": False, "error": f"不是目录: {path}"}
+        return {"ok": False, "error": f"Not a directory: {path}"}
     entries = []
     for name in sorted(os.listdir(path)):
         full = os.path.join(path, name)
@@ -110,7 +94,7 @@ def _op_read(params: dict) -> dict:
     """读取文件内容，支持行范围截取。"""
     path = _expand(params.get("path", ""))
     if not os.path.isfile(path):
-        return {"ok": False, "error": f"文件不存在: {path}"}
+        return {"ok": False, "error": f"File not found: {path}"}
 
     content = _read_text(path)
     lines   = content.splitlines()
@@ -134,7 +118,7 @@ def _op_write(params: dict) -> dict:
     content = params.get("content", "")
     encoding = params.get("encoding", "utf-8")
     if not path:
-        return {"ok": False, "error": "path 不能为空"}
+        return {"ok": False, "error": "path cannot be empty"}
     _write_text(path, content, encoding)
     return {"ok": True, "path": path,
             "bytes": len(content.encode(encoding, errors="replace"))}
@@ -147,7 +131,7 @@ def _op_append(params: dict) -> dict:
     newline = params.get("newline", True)    # 是否在追加前插入换行
 
     if not path:
-        return {"ok": False, "error": "path 不能为空"}
+        return {"ok": False, "error": "path cannot be empty"}
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -172,9 +156,9 @@ def _op_patch(params: dict) -> dict:
     use_re = params.get("use_regex", False)
 
     if not os.path.isfile(path):
-        return {"ok": False, "error": f"文件不存在: {path}"}
+        return {"ok": False, "error": f"File not found: {path}"}
     if not reps:
-        return {"ok": False, "error": "replacements 不能为空"}
+        return {"ok": False, "error": "replacements cannot be empty"}
 
     content = _read_text(path)
     original = content
@@ -198,7 +182,7 @@ def _op_patch(params: dict) -> dict:
 
     if content == original:
         return {"ok": False, "path": path, "replaced": 0,
-                "error": "未匹配到任何内容，文件未修改。可能原因：old 字符串与文件实际内容不符（空格/缩进/换行不一致）。建议改用 file_op read 读取文件后用 file_op write 覆写整个文件。"}
+                "error": "No match; file unchanged. Try file_op read then file_op write to overwrite."}
 
     _write_text(path, content)
     return {"ok": True, "path": path, "replaced": total_count}
@@ -212,7 +196,7 @@ def _op_insert(params: dict) -> dict:
     after    = params.get("after", False)     # False=之前插入, True=之后插入
 
     if not os.path.isfile(path):
-        return {"ok": False, "error": f"文件不存在: {path}"}
+        return {"ok": False, "error": f"File not found: {path}"}
 
     lines = _read_text(path).splitlines(keepends=True)
     idx   = max(0, min(line_num - 1, len(lines)))
@@ -233,7 +217,7 @@ def _op_delete_lines(params: dict) -> dict:
     end   = params.get("line_end", start + 1)
 
     if not os.path.isfile(path):
-        return {"ok": False, "error": f"文件不存在: {path}"}
+        return {"ok": False, "error": f"File not found: {path}"}
 
     lines = _read_text(path).splitlines(keepends=True)
     deleted = lines[start:end]
@@ -253,7 +237,7 @@ def _op_copy(params: dict) -> dict:
     src  = _expand(params.get("src", ""))
     dst  = _expand(params.get("dst", ""))
     if not os.path.exists(src):
-        return {"ok": False, "error": f"源不存在: {src}"}
+        return {"ok": False, "error": f"Source not found: {src}"}
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     if os.path.isdir(src):
         shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -266,7 +250,7 @@ def _op_move(params: dict) -> dict:
     src = _expand(params.get("src", ""))
     dst = _expand(params.get("dst", ""))
     if not os.path.exists(src):
-        return {"ok": False, "error": f"源不存在: {src}"}
+        return {"ok": False, "error": f"Source not found: {src}"}
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     shutil.move(src, dst)
     return {"ok": True, "src": src, "dst": dst}
@@ -276,13 +260,13 @@ def _op_delete(params: dict) -> dict:
     path  = _expand(params.get("path", ""))
     force = params.get("force", False)
     if not os.path.exists(path):
-        return {"ok": False, "error": f"路径不存在: {path}"}
+        return {"ok": False, "error": f"Path not found: {path}"}
     if os.path.isdir(path):
         if force:
             shutil.rmtree(path)
         else:
             return {"ok": False,
-                    "error": "删除目录需要 force: true（该操作不可恢复）"}
+                    "error": "Delete directory requires force: true (irreversible)"}
     else:
         os.remove(path)
     return {"ok": True, "deleted": path}
@@ -298,7 +282,7 @@ def _op_exists(params: dict) -> dict:
 def _op_stat(params: dict) -> dict:
     path = _expand(params.get("path", ""))
     if not os.path.exists(path):
-        return {"ok": False, "error": f"不存在: {path}"}
+        return {"ok": False, "error": f"Not found: {path}"}
     s = os.stat(path)
     return {
         "ok": True, "path": path,
@@ -347,7 +331,7 @@ def _op_find_program(params: dict) -> dict:
     import glob
     name = params.get("name", "").strip()
     if not name:
-        return {"ok": False, "error": "name 不能为空"}
+        return {"ok": False, "error": "name cannot be empty"}
 
     # 搜索范围：常见安装目录 + PATH
     search_roots = [
@@ -427,7 +411,7 @@ def _op_find_program(params: dict) -> dict:
         pass  # 非 Windows 环境
 
     if not results:
-        return {"ok": False, "error": f"未找到程序: {name}（搜索范围: {search_roots}）",
+        return {"ok": False, "error": f"Program not found: {name}",
                 "searched_names": exe_names}
 
     return {"ok": True, "name": name, "count": len(results), "results": results,
@@ -454,11 +438,11 @@ def _op_launch(params: dict) -> dict:
     if not path and name:
         found = _op_find_program({"name": name})
         if not found.get("ok"):
-            return {"ok": False, "error": f"找不到程序 '{name}': {found.get('error')}"}
+            return {"ok": False, "error": f"Program not found '{name}': {found.get('error')}"}
         path = found["best"]
 
     if not path:
-        return {"ok": False, "error": "需要 path 或 name 参数"}
+        return {"ok": False, "error": "path or name required"}
 
     if not os.path.isfile(path):
         # 尝试 shutil.which
@@ -467,7 +451,7 @@ def _op_launch(params: dict) -> dict:
         if resolved:
             path = resolved
         else:
-            return {"ok": False, "error": f"可执行文件不存在: {path}"}
+            return {"ok": False, "error": f"Executable not found: {path}"}
 
     cmd = [path] + (args if isinstance(args, list) else [str(args)])
 
@@ -480,9 +464,9 @@ def _op_launch(params: dict) -> dict:
         else:
             _sp.Popen(cmd, close_fds=True)
             return {"ok": True, "path": path, "status": "launched",
-                    "message": f"已启动: {os.path.basename(path)}"}
+                    "message": f"Started: {os.path.basename(path)}"}
     except Exception as e:
-        return {"ok": False, "error": f"启动失败: {e}", "path": path}
+        return {"ok": False, "error": f"Launch failed: {e}", "path": path}
 
 # ── 调度表 ────────────────────────────────────────────────
 
@@ -510,76 +494,45 @@ _ACTIONS = {
 # ── 公开入口 ──────────────────────────────────────────────
 
 def run(action: str, params: dict) -> dict:
-    """
-    执行一个文件操作。
-    返回包含 ok: bool 的结果 dict。
-    """
+    """Execute one file operation; return dict with ok: bool."""
     fn = _ACTIONS.get(action)
     if fn is None:
         return {"ok": False,
-                "error": f"未知 action: {action}，支持: {list(_ACTIONS)}"}
+                "error": f"Unknown action: {action}; supported: {list(_ACTIONS)}"}
     try:
         return fn(params)
     except Exception as e:
-        return {"ok": False, "error": f"执行 {action} 时异常: {e}"}
+        return {"ok": False, "error": f"Error executing {action}: {e}"}
 
 
 def schema_hint() -> str:
-    """返回给 AI 的 file_op 指令格式说明（注入 system prompt 用）。"""
+    """Return file_op format hint for AI (injected into system prompt)."""
     return """
-## file_op 文件操作指令
+## file_op file operations
 
-当需要操作本地文件时，使用 command: "file_op"：
+Use command: "file_op" for local files:
 
 ```json
-{"command":"file_op","action":"<动作>","path":"<路径>","<其他参数>":"<值>"}
+{"command":"file_op","action":"<action>","path":"<path>","<key>":"<value>"}
 ```
 
-可用 action 及关键参数：
+| action       | Required   | Optional |
+| list        | path       | |
+| find        | path       | pattern regex max_depth |
+| read        | path       | line_start line_end |
+| write       | path content | encoding |
+| append      | path content | newline |
+| patch       | path replacements | use_regex |
+| insert      | path line content | after |
+| delete_lines| path line_start | line_end |
+| mkdir       | path       | |
+| copy        | src dst    | |
+| move        | src dst    | |
+| delete      | path       | force |
+| exists      | path       | |
+| tree        | path       | max_depth |
+| find_program| name       | |
+| launch      | path or name | args wait |
 
-| action       | 说明           | 必填参数               | 可选参数                          |
-|-------------|----------------|----------------------|---------------------------------|
-| list        | 列出目录         | path                 |                                 |
-| find        | 搜索文件         | path                 | pattern(*.txt) regex max_depth  |
-| read        | 读取文件         | path                 | line_start line_end             |
-| write       | 写入/覆盖        | path content         | encoding                        |
-| append      | 追加内容         | path content         | newline                         |
-| patch       | 替换文件内容      | path replacements    | use_regex                       |
-| insert      | 插入行           | path line content    | after                           |
-| delete_lines| 删除行范围        | path line_start      | line_end                        |
-| mkdir       | 创建目录         | path                 |                                 |
-| copy        | 复制             | src dst              |                                 |
-| move        | 移动/重命名       | src dst              |                                 |
-| delete      | 删除             | path                 | force(目录需true)                |
-| exists      | 检查是否存在       | path                 |                                 |
-| tree        | 目录树           | path                 | max_depth                       |
-| find_program| 查找已安装程序     | name                 |                                 |
-| launch      | 启动程序/文件      | path 或 name         | args wait                       |
-
-find_program + launch 示例（查找并启动 Photoshop）：
-```json
-{"command":"file_op","action":"find_program","name":"Photoshop"}
-```
-收到路径后启动：
-```json
-{"command":"file_op","action":"launch","path":"C:\\Program Files\\Adobe\\...\\Photoshop.exe"}
-```
-或一步直接启动（自动查找）：
-```json
-{"command":"file_op","action":"launch","name":"Photoshop"}
-```
-
-patch 示例（多处替换）：
-```json
-{
-  "command": "file_op",
-  "action": "patch",
-  "path": "%USERPROFILE%\\Desktop\\news.txt",
-  "replacements": [
-    {"old": "旧内容1", "new": "新内容1"},
-    {"old": "旧内容2", "new": "新内容2"}
-  ]
-}
-```
-路径支持 %USERPROFILE% %DESKTOP% 等环境变量。
+Paths support %USERPROFILE% %DESKTOP% etc.
 """

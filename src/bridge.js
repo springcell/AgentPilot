@@ -1,6 +1,6 @@
 /**
- * ChatGPT Web 桥接 - 纯对话模式
- * 用户输入 → ChatGPT Web → 返回回复文本
+ * ChatGPT Web bridge - chat mode
+ * User input -> ChatGPT Web -> reply text
  */
 import * as chatgptWeb from './chatgpt-web-client.js';
 import fs from 'fs';

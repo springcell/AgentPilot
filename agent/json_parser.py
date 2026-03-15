@@ -1,7 +1,7 @@
 """
-json_parser.py — AI响应 JSON 指令解析器（独立模块）
+json_parser.py — AI response JSON instruction parser
 
-支持 AI 返回的各种格式，按优先级逐级兜底：
+Supports multiple formats with fallback strategies:
   策略1  标准代码块   ```json { } ```
   策略2  无语言标记   ``` { } ```
   策略3  裸标记行     JSON\n{ }  /  json\n{ }  /  【JSON】\n{ }
@@ -254,10 +254,10 @@ def parse(text: str, debug: bool = False) -> ParseResult:
                 break
 
     if not result.blocks:
-        result.warnings.append("所有策略均未找到有效 JSON 指令块")
-        logger.warning("parse() 未提取到任何块，原始文本长度=%d", len(text))
+        result.warnings.append("No strategy found a valid JSON instruction block")
+        logger.warning("parse() extracted no blocks, raw text len=%d", len(text))
     else:
-        logger.info("解析成功 [%s]，共 %d 个块", result.strategy, len(result.blocks))
+        logger.info("Parsed [%s], %d block(s)", result.strategy, len(result.blocks))
 
     return result
 
@@ -275,7 +275,7 @@ def extract_json_blocks(text: str) -> list:
 
 
 if __name__ == "__main__":
-    print("粘贴 AI 响应内容（输入 END 结束）:")
+    print("Paste AI response (type END to finish):")
     lines = []
     while True:
         line = input()
@@ -285,10 +285,10 @@ if __name__ == "__main__":
     text = "\n".join(lines)
 
     result = parse(text, debug=True)
-    print(f"\n命中策略: {result.strategy or '无'}")
-    print(f"提取块数: {len(result.blocks)}")
+    print(f"\nStrategy: {result.strategy or 'none'}")
+    print(f"Blocks: {len(result.blocks)}")
     if result.warnings:
-        print(f"警告: {result.warnings}")
+        print(f"Warnings: {result.warnings}")
     for i, b in enumerate(result.blocks, 1):
         print(f"\n── 块 {i} ──")
         print(json.dumps(b, ensure_ascii=False, indent=2))

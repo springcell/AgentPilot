@@ -1,7 +1,7 @@
 """
-agent_loop.py — AI智能体主循环
-完整闭环：环境采集 → 任务 → AI规划 → 本地执行(shell+file_op) → 结果回传 → AI继续
-使用 AgentPilot 网页桥（ChatGPT Web CDP）替代 API，无需 API Key
+agent_loop.py — AI agent main loop
+Flow: env collect -> task -> AI plan -> local exec (shell+file_op) -> result back -> AI continues
+Uses AgentPilot web bridge (ChatGPT Web CDP), no API key
 """
 
 import os
@@ -14,96 +14,59 @@ from env_context import collect as collect_env, to_prompt_block, inject_env_vars
 from file_ops import schema_hint, _read_text
 from skill_manager import skills_to_prompt, save_skill_from_success
 
-# ──────────────────────────────────────────
-# 配置区（按需修改）
-# ──────────────────────────────────────────
+# Config (edit as needed)
 CHAT_URL = os.environ.get("AGENTPILOT_URL", "http://127.0.0.1:3000/chat")
-MAX_ITERATIONS = 20          # 单任务最大自动执行轮次
-EXEC_TIMEOUT = 60            # 每条命令执行超时（秒）
+MAX_ITERATIONS = 20
+EXEC_TIMEOUT = 60
 
-# ── 从外部 txt 文件加载 System Prompt ──────
 _PROMPT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system_prompt.txt")
 
 _DEFAULT_PROMPT = """\
-你是AI执行专家，只能在web端运行，通过JSON代码块与Windows本地环境交互。
+You are an AI execution expert; run only in web UI, interact with Windows via JSON blocks.
 
-## 核心规则
-
-1. 收到任务后立即拆解步骤，每一步都必须有对应的JSON代码块
-2. 严禁只输出文字描述后停止 —— 凡是涉及"保存/写入/创建文件/放到桌面"的任务，必须在同一条回复中输出JSON代码块
-3. 凡是需要在Windows执行的操作，立即输出以下格式的JSON代码块：
-
-\`\`\`json
-{
-  "command": "powershell",
-  "arguments": [
-    "第一行命令",
-    "第二行命令"
-  ]
-}
-\`\`\`
-
-4. command 只能是：powershell / cmd / python
-5. 收到 [执行结果反馈] 后，根据结果继续下一步或宣布完成
-6. 任务完成时输出：✅ 任务完成：<一句话总结>
-7. 回答简洁，不解释，严格按格式
-
-## 重要约束
-
-- 搜索类任务：先在web端整理好内容，然后必须紧接着输出写入桌面文件的JSON代码块，不得等待用户再次要求
-- 禁止询问"是否需要生成文件" —— 任务里含"放在桌面"就直接生成
-- 每次回复最多包含一个JSON代码块，执行完收到反馈再输出下一个\
+## Core rules
+1. Break task into steps; every step must have a JSON block.
+2. For save/write/create file/put on desktop, output a JSON block in the same reply.
+3. For Windows operations, output: {"command":"powershell","arguments":["line1","line2"]}
+4. command: powershell / cmd / python only.
+5. After [Execution result feedback], continue or declare done.
+6. When done output: ✅ Task complete: <one-line summary>
+7. Be concise; follow format strictly.
 """
 
 def _load_prompt() -> str:
-    """读取 system_prompt.txt；不存在时自动生成默认文件。"""
     if not os.path.exists(_PROMPT_FILE):
         with open(_PROMPT_FILE, "w", encoding="utf-8") as f:
             f.write(_DEFAULT_PROMPT)
-        print(f"📝 已生成默认 prompt 文件: {_PROMPT_FILE}")
+        print(f"Generated default prompt: {_PROMPT_FILE}")
     with open(_PROMPT_FILE, "r", encoding="utf-8") as f:
         content = f.read().strip()
-    print(f"✅ 已加载 prompt: {_PROMPT_FILE}  ({len(content)} 字符)")
+    print(f"Loaded prompt: {_PROMPT_FILE} ({len(content)} chars)")
     return content
 
-# 启动时加载一次（run_agent 内会再次热重载）
 SYSTEM_PROMPT = _load_prompt()
-
-# 会话状态：是否已开启过对话（保持单窗口，除非 /new）
 _session_has_chat = False
 
-
-# ── 中间状态识别 ───────────────────────────────────────────
 import re as _re
 
-# 用 search 而非 match，兼容 "ChatGPT 说：\n正在搜索..." 等前缀变体
 _INTERMEDIATE_PATTERNS = [
     r"正在搜索", r"正在思考", r"正在浏览", r"正在查找",
     r"Searching", r"Thinking", r"Looking up", r"Browsing",
 ]
-# AI 包装前缀（去掉后再判断）
 _PREFIX_RE = _re.compile(
     r"^[\s\S]{0,20}?ChatGPT\s*[^\n]*[：:]\s*", _re.IGNORECASE
 )
 
 def _is_intermediate(text: str) -> bool:
-    """
-    判断是否为 ChatGPT 中间过渡状态。
-    兼容前缀：'ChatGPT 说：\n正在搜索...' / '正在搜索...' 等所有变体。
-    有 JSON 特征(command/```json)时一律返回 False，不误判正常回复。
-    """
     if not text:
         return True
     t = text.strip()
     if len(t) < 5:
         return True
-    # 任务完成标记 → 一定不是中间状态（含 fallback 防 emoji 丢失）
-    if "✅ 任务完成" in t or "任务完成：" in t:
+    if "✅ Task complete" in t or "Task complete:" in t or "✅ 任务完成" in t or "任务完成：" in t:
         return False
-    # 有 JSON 特征 → 肯定是正常回复
     if any(k in t for k in ('"command"', '```json', '```')):
         return False
-    # 去掉 "ChatGPT 说：" 等前缀再匹配
     cleaned = _PREFIX_RE.sub("", t).strip()
     for pat in _INTERMEDIATE_PATTERNS:
         if _re.search(pat, cleaned, _re.IGNORECASE):
@@ -119,12 +82,77 @@ _REFUSAL_PATTERNS = [
     r"I(?:'m| am) unable", r"I cannot", r"I can't",
 ]
 
+# AI 声称已完成操作但没有 JSON 块（"假完成"）
+_FAKE_DONE_PATTERNS = [
+    r"I have (written|saved|created|placed|put)",
+    r"has been (written|saved|created|placed|put)",
+    r"file (has been|was) (written|saved|created)",
+    r"already (written|saved|created)",
+    r"我已经?(写入|保存|创建|放置|写好|整理好).{0,20}(文件|内容)",
+    r"文件(已经?|已)??(写入|保存|创建)",
+]
+
+def _task_done_marker(text: str) -> bool:
+    return (
+        "✅ Task complete" in text or "Task complete:" in text
+        or "✅ 任务完成" in text or "任务完成：" in text
+    )
+
+def _cannot_complete_marker(text: str) -> bool:
+    return "无法完成此任务" in text or "Cannot complete this task" in text
+
 def _is_refusal(text: str) -> bool:
-    """判断 AI 是否返回了拒绝执行的自然语言回复（没有 JSON）"""
-    # 有 JSON 指令特征才排除 → 仅凭 ``` 不足以排除（可能是 shell 代码块）
+    """Whether AI returned a refusal (no JSON)."""
     if '"command"' in text and any(c in text for c in ('```json', '"powershell"', '"cmd"', '"python"', '"file_op"')):
         return False
     for pat in _REFUSAL_PATTERNS:
+        if _re.search(pat, text, _re.IGNORECASE):
+            return True
+    return False
+
+
+def _is_fake_done(text: str) -> bool:
+    """Whether AI claims it already wrote/saved a file but provided no JSON block."""
+    if '"command"' in text:
+        return False
+    for pat in _FAKE_DONE_PATTERNS:
+        if _re.search(pat, text, _re.IGNORECASE):
+            return True
+    return False
+
+
+_ACTION_TASK_PATTERNS = [
+    r"启动|打开|运行|执行|安装|部署|修复|修改|创建|生成|写入|保存|上传|推送|提交",
+    r"start|launch|open|run|execute|install|fix|create|write|save|push|commit|deploy",
+    r"git\s+(push|pull|commit|add|checkout)",
+    r"\.py|\.exe|\.ps1|\.bat|\.js",
+    r"桌面|desktop|文件夹|directory|仓库|repository",
+]
+
+def _is_action_task(task_text: str) -> bool:
+    """判断任务是否是需要本地执行操作的任务（而非纯问答）。"""
+    for pat in _ACTION_TASK_PATTERNS:
+        if _re.search(pat, task_text, _re.IGNORECASE):
+            return True
+    return False
+
+
+_ASKING_WHAT_TASK_PATTERNS = [
+    r"what (specific |exact )?task",
+    r"what would you like",
+    r"what do you want",
+    r"please describe",
+    r"could you (tell|describe|specify|clarify)",
+    r"what (is|are) you (looking|asking|wanting)",
+    r"请问.*任务|请说明.*任务|请描述.*任务",
+    r"你想(让我|要我)做什么",
+]
+
+def _is_asking_what_task(text: str) -> bool:
+    """AI 在询问用户想要做什么任务（没有理解任务已经在消息里了）。"""
+    if '"command"' in text:
+        return False
+    for pat in _ASKING_WHAT_TASK_PATTERNS:
         if _re.search(pat, text, _re.IGNORECASE):
             return True
     return False
@@ -135,12 +163,13 @@ _ASK_PATH_PATTERNS = [
     r"(路径|文件).{0,10}(未知|不明|不清楚|找不到|无法确定)",
     r"请上传", r"请提供文件", r"请确认.*文件",
     r"不知道.*路径", r"没有.*路径", r"未找到.*文件",
-    r"file.*not found", r"please.*provide.*path",
-    r"could you.*provide", r"please.*upload",
+    r"file.*not found",
+    r"please (provide|give).{0,20}(path|file|location)",
+    r"please upload (the )?file",
 ]
 
 def _is_asking_for_path(text: str) -> bool:
-    """判断 AI 是否在要求用户提供文件路径（而没有自己去搜索）"""
+    """Whether AI is asking user for file path instead of searching."""
     if '"command"' in text and any(c in text for c in ('```json', '"powershell"', '"cmd"', '"python"', '"file_op"')):
         return False
     for pat in _ASK_PATH_PATTERNS:
@@ -150,18 +179,13 @@ def _is_asking_for_path(text: str) -> bool:
 
 
 def _local_find_files(task_text: str, env_info: dict) -> str:
-    """
-    本地搜索任务描述中提到的文件名，在桌面/文档/下载等目录里查找。
-    返回格式化的搜索结果字符串（直接作为 feedback 发给 AI）。
-    """
+    """Search desktop/documents/downloads for filenames mentioned in task; return formatted result for AI."""
     desktop   = env_info.get("desktop", "")
     documents = env_info.get("documents", "")
     downloads = env_info.get("downloads", "")
     search_dirs = [d for d in [desktop, documents, downloads] if d and os.path.isdir(d)]
 
-    # 从任务里提取候选文件名（含扩展名的词）
     names = _re.findall(r'[\w\-]+\.[a-zA-Z]{2,4}', task_text)
-    # 也尝试提取中英文裸名（无扩展名，后面补 .py）
     bare = _re.findall(r'(?<!\w)([a-zA-Z][\w\-]{1,20})(?!\.\w)', task_text)
     for b in bare:
         names.append(b + '.py')
@@ -191,22 +215,18 @@ def _local_find_files(task_text: str, env_info: dict) -> str:
     if not found_files:
         return ""
 
-    lines = ["[本地搜索结果]", f"在本机找到以下文件，请直接使用这些路径继续任务："]
+    lines = ["[Local search result]", f"Found the following files on this machine; use these paths to continue:"]
     for p in found_files[:10]:
         lines.append(f"  {p}")
-    lines.append("请根据以上路径，继续执行任务（读取文件内容、运行并修复）。")
+    lines.append("Use the paths above to continue (read content, run and fix).")
     return "\n".join(lines)
 
 
-# ── 任务上下文自动补全 ──────────────────────────────────────
-
-# 匹配任务描述里出现的本地文件路径（Windows 绝对路径或 .py 扩展名）
 _PATH_RE = _re.compile(
     r'[A-Za-z]:\\(?:[^\s\'"<>|*?\r\n\\][^\s\'"<>|*?\r\n]*\\)*[^\s\'"<>|*?\r\n\\]+'
     r'|(?<!\w)[\w\-. ]+\.py\b',
 )
 
-# 运行一个 .py 文件，捕获 stderr（最多前 60 行）
 def _run_py_get_error(path: str) -> str:
     import subprocess, sys
     try:
@@ -225,30 +245,21 @@ def _run_py_get_error(path: str) -> str:
 
 
 def _enrich_task(task_text: str, env_info: dict) -> str:
-    """
-    扫描任务描述中的本地文件路径，自动读取内容和运行报错，
-    追加到任务描述末尾，让 AI 不必再要求用户"上传文件"。
-    """
+    """Scan task for local file paths; read content and run errors; append so AI need not ask for uploads."""
     desktop = env_info.get("desktop", "")
     extras = []
-
-    # 从任务中提取所有候选路径
     candidates = _PATH_RE.findall(task_text)
-
-    # 也检查桌面目录里是否有任务提到的目录名（如"飞机大战"）
     dir_name_re = _re.compile(r'[\u4e00-\u9fff\w]{2,}(?=目录|文件夹|游戏|项目)?')
     if desktop and _re.search(r'桌面.*?(?:中|里|的|目录|文件夹)', task_text):
         for m in dir_name_re.finditer(task_text):
             candidate_dir = os.path.join(desktop, m.group())
             if os.path.isdir(candidate_dir):
-                # 在该目录找第一个 .py 文件
                 for fname in os.listdir(candidate_dir):
                     if fname.endswith('.py'):
                         candidates.append(os.path.join(candidate_dir, fname))
 
     seen = set()
     for raw_path in candidates:
-        # 补全相对路径
         if not os.path.isabs(raw_path) and desktop:
             raw_path = os.path.join(desktop, raw_path)
         path = os.path.normpath(raw_path)
@@ -256,38 +267,37 @@ def _enrich_task(task_text: str, env_info: dict) -> str:
             continue
         seen.add(path)
 
-        # 读取文件内容（最多 200 行，避免超长）
         try:
             content = _read_text(path)
             lines = content.splitlines()
             truncated = len(lines) > 200
             preview = "\n".join(lines[:200])
             if truncated:
-                preview += f"\n...（共 {len(lines)} 行，已截断）"
-            extras.append(f"\n## 文件内容: {path}\n```python\n{preview}\n```")
+                preview += f"\n... ({len(lines)} lines, truncated)"
+            extras.append(f"\n## File content: {path}\n```python\n{preview}\n```")
         except Exception as e:
-            extras.append(f"\n## 文件读取失败: {path}\n错误: {e}")
+            extras.append(f"\n## File read failed: {path}\nError: {e}")
             continue
 
         # 尝试运行，获取报错
         if path.endswith('.py'):
             err = _run_py_get_error(path)
             if err:
-                extras.append(f"\n## 运行报错: {path}\n```\n{err}\n```")
+                extras.append(f"\n## Run error: {path}\n```\n{err}\n```")
             else:
-                extras.append(f"\n## 运行状态: {path} 可正常启动（无报错输出）")
+                extras.append(f"\n## Run status: {path} starts without error")
 
     if not extras:
         return task_text
 
-    print(f"   [预处理] 自动注入 {len(seen)} 个本地文件上下文")
+    print(f"   [preprocess] Injected {len(seen)} local file context(s)")
     return task_text + "\n" + "\n".join(extras)
 
 
 POLL_URL      = CHAT_URL.replace("/chat", "/poll")
-POLL_INTERVAL = 3      # 轮询间隔（秒）
-POLL_TIMEOUT  = 300    # 最长等待（秒）
-STALL_SEC     = 20     # 文本无更新超过此秒数视为卡死，避免长时间等待
+POLL_INTERVAL = 3
+POLL_TIMEOUT  = 300
+STALL_SEC     = 20
 
 
 def _http_get(url: str, timeout: int = 10) -> dict:
@@ -299,9 +309,7 @@ def _http_get(url: str, timeout: int = 10) -> dict:
 
 
 def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "default") -> str:
-    """
-    发送消息并返回回复。中间状态时轮询 /poll 等待 JSON 或任务完成。
-    """
+    """Send message and return reply; on intermediate state poll /poll for JSON or task complete."""
     body = json.dumps({"message": message, "newChat": new_chat, "agentId": agent_id}).encode("utf-8")
     req = urllib.request.Request(
         CHAT_URL,
@@ -316,33 +324,27 @@ def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "defau
         err_body = e.read().decode("utf-8") if e.fp else str(e)
         if e.code == 404:
             raise RuntimeError(
-                f"AgentPilot 桥接返回 404。请先启动 API：\n"
-                f"  另开终端运行: npm run api\n"
-                f"原始错误: {err_body}"
+                f"AgentPilot bridge returned 404. Start API first:\n"
+                f"  In another terminal: npm run api\n"
+                f"Raw error: {err_body}"
             )
-        raise RuntimeError(f"AgentPilot 请求失败 ({e.code}): {err_body}")
+        raise RuntimeError(f"AgentPilot request failed ({e.code}): {err_body}")
     except urllib.error.URLError as e:
-        raise RuntimeError(f"无法连接 AgentPilot，请先运行 npm run api: {e.reason}")
+        raise RuntimeError(f"Cannot connect to AgentPilot; run npm run api first: {e.reason}")
 
     if not data.get("ok"):
-        raise RuntimeError(data.get("error", "未知错误"))
+        raise RuntimeError(data.get("error", "Unknown error"))
 
     result = data.get("result", "")
 
-    # 任务完成 → 最高优先级，直接返回
-    if "✅ 任务完成" in result or "任务完成：" in result:
+    if _task_done_marker(result):
         return result
-
-    # 无法完成此任务 → 直接返回
-    if "无法完成此任务" in result:
+    if _cannot_complete_marker(result):
         return result
-
-    # 非中间状态 → 直接返回（已有 JSON 或完整回复）
     if not _is_intermediate(result):
         return result
 
-    # 中间状态（正在搜索等）→ 轮询等待 JSON 或任务完成
-    print(f"   [Python] ⚠️ 中间状态 '{result[:60].replace(chr(10),' ')}'，轮询 /poll 等待 JSON...")
+    print(f"   [Python] Intermediate '{result[:60].replace(chr(10),' ')}', polling /poll for JSON...")
     deadline      = time.time() + POLL_TIMEOUT
     last_text     = result
     last_change_t = time.time()
@@ -354,35 +356,27 @@ def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "defau
             continue
         current    = poll.get("text", "")
         generating = poll.get("generating", True)
-        print(f"   [轮询] generating={generating} len={len(current)}: "
+        print(f"   [poll] generating={generating} len={len(current)}: "
               f"{current[:60].replace(chr(10), ' ')}")
 
-        # 任务完成标记 → 直接返回
-        if "✅ 任务完成" in current or "任务完成：" in current:
-            print(f"   [轮询] ✅ 任务完成")
+        if _task_done_marker(current):
+            print(f"   [poll] Task complete")
             return current
-
-        # 无法完成此任务 → 直接返回
-        if "无法完成此任务" in current:
-            print(f"   [轮询] ⚠️ 无法完成此任务")
+        if _cannot_complete_marker(current):
+            print(f"   [poll] AI cannot complete this task")
             return current
-
-        # 非中间状态（含 JSON）→ 直接返回
         if not _is_intermediate(current):
-            print(f"   [轮询] ✅ 完整回复 len={len(current)}")
+            print(f"   [poll] Full reply len={len(current)}")
             return current
 
-        # 文本有变化 → 重置卡死计时
         if current != last_text:
             last_text     = current
             last_change_t = time.time()
 
-        # 卡死检测：generating=false + 中间状态 + 文本长时间不变
         if not generating and (time.time() - last_change_t) > STALL_SEC:
-            print(f"   [轮询] ⚠️ 卡死 {STALL_SEC}s 无更新，强制继续")
+            print(f"   [poll] Stall {STALL_SEC}s no update, forcing continue")
             return current
 
-    # 超时兜底
     poll = _http_get(f"{POLL_URL}?agentId={agent_id}")
     return poll.get("text", result)
 
@@ -390,15 +384,20 @@ def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "defau
 def run_agent(user_task: str, verbose: bool = True) -> str:
     global _session_has_chat
 
-    # 解析 /new 指令：仅此时开新窗口
     task_text = user_task.strip()
     force_new = task_text.lower().startswith("/new")
     if force_new:
-        task_text = task_text[4:].strip() or "继续"
+        task_text = task_text[4:].strip()
+
+    # /new 单独使用（不带任务）：只重置会话窗口，不发任何消息
+    if force_new and not task_text:
+        _session_has_chat = False
+        print("🔄 New conversation window will open on next task.")
+        return ""
+
     if not task_text:
         task_text = user_task
 
-    # 仅首次启动或 /new 时开新窗口，其余保持单窗口上下文
     new_chat = force_new or not _session_has_chat
     if new_chat:
         _session_has_chat = True
@@ -416,112 +415,120 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
         f"{env_block}\n\n"
         f"{file_ops_hint}\n\n"
         + (f"{skill_hint}\n\n" if skill_hint else "")
-        + f"---\n\n用户任务: {enriched_task}"
+        + f"---\n\n"
+        + f"User task (execute now, no questions): {enriched_task}"
     )
     messages_to_send = [first_message]
-    executed_blocks: list[dict] = []   # 记录本次任务所有成功执行的 JSON 块
+    executed_blocks: list[dict] = []
     iteration     = 0
     agent_id_main = "default"
 
     if skill_hint:
-        print(f"   [经验库] 找到匹配的历史 skill，已注入 prompt")
+        print(f"   [skills] Matched history skill injected into prompt")
 
     print(f"\n{'='*60}")
-    print(f"🚀 任务启动: {task_text}" + (" (新窗口)" if new_chat and force_new else ""))
-    print(f"📂 桌面: {env_info.get('desktop', '')}")
+    print(f"Task: {task_text}" + (" (new window)" if new_chat and force_new else ""))
+    print(f"Desktop: {env_info.get('desktop', '')}")
     print(f"{'='*60}\n")
 
     while iteration < MAX_ITERATIONS:
         iteration += 1
 
         if verbose:
-            print(f"[{iteration}] 🤖 AI思考中...")
+            print(f"[{iteration}] AI thinking...")
 
         try:
             ai_text = chat_via_bridge(messages_to_send[-1], new_chat=new_chat, agent_id=agent_id_main)
         except RuntimeError as e:
-            print(f"\n❌ 错误: {e}")
+            print(f"\nError: {e}")
             return ""
 
         new_chat = False
 
         if verbose:
-            print(f"\n[AI响应]\n{ai_text}\n")
+            print(f"\n[AI reply]\n{ai_text}\n")
 
-        # 无法完成此任务 → 直接打印并返回
-        if "无法完成此任务" in ai_text:
-            print(f"\n⚠️ AI 无法完成此任务")
+        if _cannot_complete_marker(ai_text):
+            print(f"\nAI cannot complete this task")
             return ai_text
 
         blocks = extract_json_blocks(ai_text)
 
-        # AI 没有输出 JSON 时，判断原因并自动处理
         if not blocks:
-            # 情况A：AI 说找不到文件/需要路径 → 本地执行 file_op find，把结果喂回去
             if _is_asking_for_path(ai_text):
                 find_result = _local_find_files(task_text, env_info)
                 if find_result:
-                    print(f"\n⚠️ AI 要求提供路径，本地已自动搜索，结果回传给 AI...")
+                    print(f"\nAI asked for path; local search done, sending result back...")
                     messages_to_send.append(find_result)
                     continue
 
-            # 情况B：AI 拒绝直接操作 → 提示改用 JSON 命令行
-            if _is_refusal(ai_text) and iteration <= 2:
-                print(f"\n⚠️ AI 拒绝直接操作，自动重试：要求改用命令行方式...")
+            if _is_refusal(ai_text) and iteration <= 2 and _is_action_task(task_text):
+                print(f"\nAI refused direct action; retrying with JSON command request...")
                 messages_to_send.append(
-                    "你之前说无法直接执行，但你可以输出 powershell 或 python 的 JSON 代码块，"
-                    "由本地程序代为执行。请不要拒绝，直接输出对应的 JSON 代码块完成任务。"
+                    "You said you cannot execute directly, but you can output a powershell or python JSON block "
+                    "for the local program to run. Do not refuse; output the JSON block to complete the task."
                 )
                 continue
 
-            # 情况C：真正结束（任务完成或无后续指令）
+            # 情况D：AI 声称已写入/保存文件但没有 JSON 块（"假完成"）
+            if _is_fake_done(ai_text) and iteration <= 2 and _is_action_task(task_text):
+                print(f"\nAI claimed file was written but produced no JSON block; requesting actual JSON...")
+                messages_to_send.append(
+                    "You described writing a file but did not output any JSON block. "
+                    "No file was actually written—the local program only executes JSON blocks. "
+                    "Output a file_op write JSON block now with the full file content."
+                )
+                continue
+
+            # 情况E：AI 在询问"要做什么任务"——直接把原始任务重发一遍
+            if _is_asking_what_task(ai_text) and iteration == 1:
+                print(f"\nAI asked what to do; re-sending task directly...")
+                messages_to_send.append(
+                    f"The task is already stated. Execute it now without asking questions:\n\n{task_text}"
+                )
+                continue
+
             if verbose and ai_text:
                 preview = ai_text[:200] + ("..." if len(ai_text) > 200 else "")
-                print(f"\n⚠️ 无exec指令（收到 {len(ai_text)} 字符）")
-                print(f"   预览: {preview!r}")
-            print(f"\n✅ 智能体结束（无更多指令）")
+                print(f"\nNo exec instruction (received {len(ai_text)} chars)")
+                print(f"   Preview: {preview!r}")
+            print(f"\nAgent done (no more instructions)")
             return ai_text
 
         if verbose:
-            print(f"[{iteration}] ⚙️  执行 {len(blocks)} 条本地指令...")
+            print(f"[{iteration}] Executing {len(blocks)} local instruction(s)...")
 
         results, feedback = run_from_text(ai_text)
 
-        # 记录本轮成功执行的块（用于最终保存 skill）
         from json_parser import extract_json_blocks as _parse_blocks
         for block, r in zip(_parse_blocks(ai_text), results):
             if r.get("success"):
                 executed_blocks.append(block)
 
         if verbose:
-            print(f"\n[执行结果]\n{feedback}\n")
+            print(f"\n[Execution result]\n{feedback}\n")
 
         messages_to_send.append(feedback)
 
-        if "✅ 任务完成" in ai_text or "任务完成：" in ai_text:
-            print(f"\n✅ 智能体宣告任务完成")
+        if _task_done_marker(ai_text):
+            print(f"\nAgent declared task complete")
             if executed_blocks:
                 skill_name = save_skill_from_success(task_text, executed_blocks)
-                print(f"   [经验库] 已保存 skill: {skill_name}")
+                print(f"   [skills] Saved skill: {skill_name}")
             return ai_text
 
         if not all(r["success"] for r in results):
             failed = [r for r in results if not r["success"]]
-            print(f"[{iteration}] ⚠️  {len(failed)} 条指令失败，AI将重试...")
+            print(f"[{iteration}] {len(failed)} instruction(s) failed, AI will retry...")
 
         time.sleep(0.5)
 
-    print(f"\n⚠️  达到最大迭代次数 ({MAX_ITERATIONS})，循环终止")
+    print(f"\nMax iterations ({MAX_ITERATIONS}) reached, stopping")
     return messages_to_send[-1] if messages_to_send else ""
 
 
 def _read_multiline(prompt: str) -> str:
-    """
-    读取多行输入。
-    - 空行结束输入（提交）
-    - 单独一行 'quit'/'exit'/'q' 退出
-    - 单行内容直接回车也正常工作（兼容单行习惯）
-    """
+    """Read multiline input; empty line submits; 'quit'/'exit'/'q' to exit."""
     print(prompt)
     lines = []
     while True:
@@ -529,14 +536,11 @@ def _read_multiline(prompt: str) -> str:
             line = input()
         except EOFError:
             break
-        # 退出指令
         if not lines and line.strip().lower() in ("quit", "exit", "q"):
             return line.strip()
-        # 空行 = 结束输入
         if line == "":
             if lines:
                 break
-            # 还没输入任何内容时忽略空行
             continue
         lines.append(line)
     return "\n".join(lines)
@@ -544,17 +548,17 @@ def _read_multiline(prompt: str) -> str:
 
 def interactive_mode():
     print("╔══════════════════════════════════════╗")
-    print("║     Windows AI 智能体执行器 v1.0      ║")
-    print("║  输入任务，AI将自动规划并本地执行      ║")
-    print("║  (AgentPilot 网页桥，无需 API Key)   ║")
+    print("║   Windows AI Agent Executor v1.0     ║")
+    print("║  Enter task; AI plans and runs it    ║")
+    print("║  (AgentPilot web bridge, no API key) ║")
     print("╚══════════════════════════════════════╝")
-    print(f"📄 Prompt 文件: {_PROMPT_FILE}")
-    print("输入 'quit' 退出，'/new 任务' 开启新窗口")
-    print("多行输入：换行继续，空行提交；单行直接回车也可提交")
-    print("请确保已启动 AgentPilot: npm run api\n")
+    print(f"Prompt file: {_PROMPT_FILE}")
+    print("Type 'quit' to exit, '/new task' for new window")
+    print("Multiline: newline to continue, empty line to submit. Single line: Enter to submit.")
+    print("Ensure AgentPilot is running: npm run api\n")
 
     while True:
-        task = _read_multiline("📋 任务（空行提交）> ")
+        task = _read_multiline("Task (empty line to submit)> ")
         if task.lower() in ("quit", "exit", "q"):
             print("退出")
             break

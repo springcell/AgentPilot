@@ -1,7 +1,6 @@
 /**
- * MCP Server - 暴露 ask_chatgpt 工具给 Cursor Agent
- * Cursor Agent 使用内置模型，需要调用 ChatGPT 时通过此工具
- * 避免作为主模型时的循环问题
+ * MCP Server - exposes ask_chatgpt tool to Cursor Agent
+ * Cursor uses built-in model; when it needs ChatGPT, it calls this tool
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';

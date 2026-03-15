@@ -1,4 +1,4 @@
-﻿# 运行 Python 智能体：自动检测并启动桥接 API（若未运行）
+# Run Python agent; start bridge API if not running
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$Task = @()
@@ -18,27 +18,27 @@ function Test-ApiReady {
     }
 }
 
-# 1. 若 API 未运行，后台启动
+# 1. Start API if not running
 if (-not (Test-ApiReady)) {
-    Write-Host "桥接 API 未运行，正在启动 api-server..." -ForegroundColor Yellow
+    Write-Host "Bridge API not running, starting api-server..." -ForegroundColor Yellow
     $apiPath = Join-Path $rootDir "src\api-server.js"
-    $apiJob = Start-Process -FilePath "node" -ArgumentList $apiPath -WorkingDirectory $rootDir -PassThru -WindowStyle Hidden
-    Write-Host "等待 API 就绪 (max 15s)..." -ForegroundColor Yellow
+    $null = Start-Process -FilePath "node" -ArgumentList $apiPath -WorkingDirectory $rootDir -PassThru -WindowStyle Hidden
+    Write-Host "Waiting for API (max 15s)..." -ForegroundColor Yellow
     $waited = 0
     while (-not (Test-ApiReady) -and $waited -lt 15) {
         Start-Sleep -Seconds 1
         $waited++
     }
     if (-not (Test-ApiReady)) {
-        Write-Host "API 启动超时。请手动运行: npm run api" -ForegroundColor Red
+        Write-Host "API startup timeout. Run: npm run api" -ForegroundColor Red
         exit 1
     }
-    Write-Host "桥接 API 已就绪 ($chatUrl)" -ForegroundColor Green
+    Write-Host "Bridge API ready ($chatUrl)" -ForegroundColor Green
 } else {
-    Write-Host "桥接 API 已运行 ($chatUrl)" -ForegroundColor Green
+    Write-Host "Bridge API running ($chatUrl)" -ForegroundColor Green
 }
 
-# 2. 检查 CDP（Chrome）
+# 2. Check CDP (Chrome)
 $cdpUrl = "http://127.0.0.1:9222"
 if ($rootDir) {
   $configPath = Join-Path $rootDir "config.json"
@@ -53,16 +53,16 @@ try {
     $null = Invoke-WebRequest -Uri "$cdpUrl/json/version" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
 } catch {
     Write-Host ""
-    Write-Host "提示: Chrome 未连接。请另开终端运行: npm run chrome" -ForegroundColor Yellow
-    Write-Host "      然后在浏览器中登录 https://chatgpt.com/" -ForegroundColor Yellow
+    Write-Host "Chrome not connected. Run in another terminal: npm run chrome" -ForegroundColor Yellow
+    Write-Host "Then log in at https://chatgpt.com/" -ForegroundColor Yellow
     Write-Host ""
 }
 
-# 3. 运行 Python 智能体
+# 3. Run Python agent
 if (-not $rootDir) { $rootDir = (Get-Location).Path }
 $agentPath = Join-Path $rootDir "agent\agent_loop.py"
 if (-not (Test-Path $agentPath)) {
-    Write-Host "未找到 agent_loop.py: $agentPath" -ForegroundColor Red
+    Write-Host "agent_loop.py not found: $agentPath" -ForegroundColor Red
     exit 1
 }
 Set-Location $rootDir

@@ -1,77 +1,82 @@
-# Windows AI 智能体执行器
+# Windows AI Agent Executor
 
-通过 AgentPilot 网页桥驱动 ChatGPT，无需 API Key。AI 规划任务并输出 JSON 指令，本地执行器在 Windows 上执行。
+Uses AgentPilot web bridge to drive ChatGPT; no API key. AI plans tasks and outputs JSON instructions; local executor runs them on Windows.
 
-## 项目结构
+## Layout
 
 ```
 agent/
-├── json_parser.py    # JSON 指令解析（多策略兜底）
-├── executor.py       # 本地执行核心
-├── agent_loop.py     # AI 闭环主程序（调用网页桥）
-├── system_prompt.txt # 可编辑的系统提示
-├── requirements.txt  # 依赖（本方案仅用标准库）
+├── json_parser.py    # JSON instruction parsing (multi-strategy fallback)
+├── executor.py       # Local execution core
+├── agent_loop.py     # AI loop (calls web bridge)
+├── system_prompt.txt # Editable system prompt
+├── requirements.txt
 └── README.md
 ```
 
-## 架构
+## Flow
 
 ```
-用户输入任务
+User input
     ↓
-agent_loop.py → AgentPilot 网页桥 (ChatGPT Web CDP)
-    ↓ AI 返回含 JSON 的响应
-executor.py → 提取 JSON 块 → 本地执行 (PowerShell/cmd/Python)
-    ↓ 执行结果
-agent_loop.py → 回传给 AI → AI 继续下一步
+agent_loop.py → AgentPilot web bridge (ChatGPT Web CDP)
+    ↓ AI response with JSON blocks
+executor.py → extract JSON → run locally (PowerShell/cmd/Python)
+    ↓ result
+agent_loop.py → send back to AI → AI continues
     ↓
-直到 AI 输出 "✅ 任务完成" 或无更多 JSON 指令
+Until AI outputs "✅ Task complete" or no more JSON
 ```
 
-## 前置条件
+## Prerequisites
 
-1. **Chrome 并登录 ChatGPT**（必须）：
+1. **Chrome and log in to ChatGPT** (required):
    ```powershell
    npm run chrome
    ```
-   在浏览器中打开 https://chatgpt.com/ 并登录。
-2. **桥接 API**：`npm run agent` 会自动启动；或手动 `npm run api`。
+   Open https://chatgpt.com/ in the browser and log in.
+2. **Bridge API**: started automatically by `npm run agent`, or run `npm run api` manually.
 
-## 运行
+## Run
 
 ```powershell
-# 推荐：一键运行（自动启动桥接 API）
+# Recommended: one-shot (starts bridge API if needed)
 npm run agent
-npm run agent "帮我找今天10条美伊新闻放在桌面"
+npm run agent "find 10 US-Iran news and put on desktop"
 
-# 或直接调用 Python（需先 npm run api）
+# Start a new conversation (fresh ChatGPT thread)
+npm run agent "/new your task"
+
+# Or run Python directly (run npm run api first)
 npm run agent:raw
-python agent/agent_loop.py "任务描述"
+python agent/agent_loop.py "task description"
 
-# 只测试执行器（不调用 AI，手动粘贴 AI 响应）
+# Test executor only (no AI; paste AI response manually)
 python agent/executor.py
 ```
 
-## 配置
+Use **`/new`** before your message to open a new chat (e.g. `/new find 10 news` or `"/new your task"` in one-shot).
 
-- `AGENTPILOT_URL` 环境变量：默认 `http://127.0.0.1:3000/chat`
-- 修改 `agent_loop.py` 中的 `SYSTEM_PROMPT` 可自定义 AI 行为（如限制操作范围）
+## Config
 
-## JSON 指令格式
+- `AGENTPILOT_URL` env: default `http://127.0.0.1:3000/chat`
+- Edit `SYSTEM_PROMPT` in `agent_loop.py` to restrict or customize AI behavior.
+
+## JSON instruction format
 
 ```json
 {
   "command": "powershell",
   "arguments": [
     "$desktop = [Environment]::GetFolderPath('Desktop')",
-    "Write-Output '执行成功'"
+    "Write-Output 'Done'"
   ]
 }
 ```
 
-支持的 command：`powershell`、`cmd`、`python`
+Supported commands: `powershell`, `cmd`, `python`, `file_op` (see system_prompt.txt).
 
-## 安全提示
+## Security
 
-- 本程序会在本地执行 AI 生成的代码，请只对可信任务使用
-- 建议在 SYSTEM_PROMPT 中明确限制可执行的操作范围
+- This program runs AI-generated code locally; use only for trusted tasks.
+- Restrict allowed operations in SYSTEM_PROMPT when possible.

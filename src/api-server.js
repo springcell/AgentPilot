@@ -19,12 +19,10 @@ function loadConfig() {
   return JSON.parse(raw);
 }
 
-// ── agent_loop.py 轮询缓存 ──────────────────────────────
-// key: agentId (默认 "default")
-// value: { text, generating, updatedAt }
+// agent_loop.py poll cache: key = agentId (default "default"), value = { text, generating, updatedAt }
 const _replyCache = {};
 
-// 用 search 而非 ^ 匹配，兼容 "ChatGPT 说： 正在搜索网页" 等前缀变体
+// Match intermediate state (search/think/browse); supports "ChatGPT says: ..." style prefix
 const _INTERMEDIATE_RE = [
   /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
   /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
@@ -32,13 +30,13 @@ const _INTERMEDIATE_RE = [
 
 function _isIntermediate(text) {
   if (!text) return true;
-  if (text.includes('✅ 任务完成') || text.includes('任务完成：')) return false;  // 任务完成 → 最高优先级
+  // Task complete (highest priority); accept both EN and legacy CN
+  if (text.includes('✅ Task complete') || text.includes('Task complete:') ||
+      text.includes('✅ 任务完成') || text.includes('任务完成：')) return false;
   if (text.trim().length < 20) return true;
-  // 去掉 "ChatGPT 说：" 等前缀再匹配（与 agent_loop 一致）
   const cleaned = text.trim().replace(/^[\s\S]{0,30}?ChatGPT\s*[^\n]*[：:]\s*/i, '').trim();
   return _INTERMEDIATE_RE.some(r => r.test(cleaned));
 }
-// ──────────────────────────────────────────────────────
 
 function getContentFromItem(item) {
   if (typeof item.content === 'string') return item.content;
@@ -207,7 +205,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (!parsed.messages && parsed.input) {
-      console.log('[chat] Cursor Responses API format (input) detected, converting');
+      console.log('[chat] Cursor Responses API format (input) detected, converting to messages');
     }
 
     const result = await handleChatCompletions(parsed);
@@ -274,14 +272,12 @@ const server = http.createServer(async (req, res) => {
       const result = await bridge.chat(message, { newChat: !!newChat });
       const text = result?.result ?? '';
       const intermediate = _isIntermediate(text);
-      // 中间状态时保持 generating:true，agent_loop /poll 继续等待 DOM 更新
       _replyCache[agentId] = { text, generating: intermediate, updatedAt: Date.now() };
       if (intermediate) {
-        console.warn(`  [poll] ⚠️ agentId=${agentId} 中间状态(len=${text.length})，keeping generating:true`);
+        console.warn(`  [poll] agentId=${agentId} intermediate (len=${text.length}), keeping generating:true`);
         console.warn(`  [poll]    "${text.slice(0, 60).replace(/\n/g, ' ')}"`);
-        // 后台持续读 DOM，直到拿到真实回复后更新缓存
         _pollDomUntilFinal(agentId).catch(e =>
-          console.error('  [poll] DOM轮询出错:', e.message)
+          console.error('  [poll] DOM poll error:', e.message)
         );
       }
       res.writeHead(200);
@@ -294,8 +290,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-// ── 后台 DOM 轮询：bridge 返回中间状态后持续读页面，直到拿到真实回复 ──────
-// chatgpt-web-client 没有暴露纯读接口，改用 puppeteer 直接读已有 page
+// Background DOM poll: after bridge returns intermediate state, keep reading page until final reply
 async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
   const config = loadConfig();
   const cdp = config?.llm?.cdp ?? {};
@@ -303,12 +298,11 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
   const POLL_MS = 1500;
   const deadline = Date.now() + maxMs;
 
-  // 动态 import puppeteer（避免循环依赖）
   let puppeteer;
   try {
     puppeteer = (await import('puppeteer-core')).default;
   } catch (e) {
-    console.error('  [DOM轮询] puppeteer-core 不可用:', e.message);
+    console.error('  [DOM poll] puppeteer-core not available:', e.message);
     if (_replyCache[agentId]) _replyCache[agentId].generating = false;
     return;
   }
@@ -317,12 +311,12 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
   try {
     browser = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
   } catch (e) {
-    console.error('  [DOM轮询] 无法连接 CDP:', e.message);
+    console.error('  [DOM poll] Cannot connect to CDP:', e.message);
     if (_replyCache[agentId]) _replyCache[agentId].generating = false;
     return;
   }
 
-  console.log(`  [DOM轮询] 启动 agentId=${agentId}，最长等待 ${maxMs/1000}s`);
+  console.log(`  [DOM poll] agentId=${agentId}, max wait ${maxMs/1000}s`);
 
   try {
     while (Date.now() < deadline) {
@@ -331,7 +325,6 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
       const pages = await browser.pages();
       const chatPages = pages.filter(p => p.url().includes('chatgpt.com'));
       if (!chatPages.length) continue;
-      // 优先选有 stop-button 的（正在生成）或内容最长的，确保读到当前对话
       let page = chatPages.find(p => true);
       for (const p of chatPages) {
         try {
@@ -349,7 +342,6 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
 
       if (!text) continue;
 
-      // 检查是否还在生成（发送按钮可见说明已停止）
       const stillGenerating = await page.evaluate(() =>
         !!document.querySelector('[data-testid="stop-button"]')
       ).catch(() => false);
@@ -358,11 +350,9 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
 
       if (!stillGenerating && !_isIntermediate(text)) {
         _replyCache[agentId] = { text, generating: false, updatedAt: Date.now() };
-        console.log(`  [DOM轮询] ✅ agentId=${agentId} 拿到真实回复 len=${text.length}`);
+        console.log(`  [DOM poll] agentId=${agentId} got final reply len=${text.length}`);
         return;
       }
-
-      // 更新缓存中的文本（让 agent_loop 能看到最新进度）
       if (_replyCache[agentId]) {
         _replyCache[agentId].text = text;
         _replyCache[agentId].updatedAt = Date.now();
@@ -372,14 +362,13 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
     await browser.disconnect().catch(() => {});
   }
 
-  // 超时：强制解锁
   if (_replyCache[agentId]) {
     _replyCache[agentId].generating = false;
-    console.warn(`  [DOM轮询] ⏰ agentId=${agentId} 超时，强制 generating=false`);
+    console.warn(`  [DOM poll] agentId=${agentId} timeout, forcing generating=false`);
   }
 }
 
-  // GET /poll?agentId=default  —  agent_loop.py 轮询最新回复
+  // GET /poll?agentId=default — agent_loop.py polls for latest reply
   if (req.method === 'GET' && pathname === '/poll') {
     const agentId = new URL(req.url, 'http://localhost').searchParams.get('agentId') ?? 'default';
     const cached = _replyCache[agentId] ?? { text: '', generating: false, updatedAt: 0 };
@@ -395,7 +384,7 @@ async function _pollDomUntilFinal(agentId, maxMs = 240_000) {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '127.0.0.1', () => {
   console.log('AgentPilot API: http://127.0.0.1:' + PORT);
-  console.log('  POST /chat - 智能体对话 (agent_loop.py)');
+  console.log('  POST /chat - agent dialog (agent_loop.py)');
   console.log('');
   console.log('Cursor: Base URL must be PUBLIC (Cursor routes via api2.cursor.sh)');
   console.log('  Run: npm run ngrok');
@@ -404,7 +393,7 @@ server.listen(PORT, '127.0.0.1', () => {
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error('');
-    console.error('端口 ' + PORT + ' 已被占用。可执行以下命令释放：');
+    console.error('Port ' + PORT + ' in use. Free it with:');
     console.error('  npm run api:stop');
     console.error('');
     process.exit(1);

@@ -1,5 +1,5 @@
-﻿
-# 一键启动：1 Chrome  2 API  3 Agent
+
+# One-shot: 1 Chrome  2 API  3 Agent
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$Message = @()
@@ -43,16 +43,16 @@ function Test-ApiReady {
     }
 }
 
-# ── 1. Chrome ─────────────────────────────────────────────
+# 1. Chrome
 if (-not (Test-CdpReady)) {
-    Write-Host "[1/3] 启动 Chrome..." -ForegroundColor Cyan
+    Write-Host "[1/3] Starting Chrome..." -ForegroundColor Cyan
     $chromePath = ""
     if ($config.llm -and $config.llm.cdp -and $config.llm.cdp.chromePath) {
         $chromePath = $config.llm.cdp.chromePath
     }
     & (Join-Path $scriptDir "launch-chrome.ps1") -Port $port -ChromePath $chromePath
 
-    Write-Host "等待 Chrome CDP (最多 30s)..." -ForegroundColor Yellow
+    Write-Host "Waiting for Chrome CDP (max 30s)..." -ForegroundColor Yellow
     $maxWait = 30
     $waited = 0
     while (-not (Test-CdpReady) -and $waited -lt $maxWait) {
@@ -61,34 +61,34 @@ if (-not (Test-CdpReady)) {
     }
 
     if (-not (Test-CdpReady)) {
-        Write-Host "CDP 未就绪。请关闭所有 Chrome 窗口后重试，或在浏览器中打开 https://chatgpt.com/ 并登录" -ForegroundColor Red
+        Write-Host "CDP not ready. Close all Chrome windows and retry, or open https://chatgpt.com/ and log in" -ForegroundColor Red
         exit 1
     }
-    Write-Host "Chrome 已连接 ($cdpUrl)" -ForegroundColor Green
+    Write-Host "Chrome connected ($cdpUrl)" -ForegroundColor Green
 } else {
-    Write-Host "[1/3] Chrome 已连接 ($cdpUrl)" -ForegroundColor Green
+    Write-Host "[1/3] Chrome connected ($cdpUrl)" -ForegroundColor Green
 }
 
-# ── 2. API ─────────────────────────────────────────────────
+# 2. API
 if (-not (Test-ApiReady)) {
-    Write-Host "[2/3] 启动 API 服务..." -ForegroundColor Cyan
+    Write-Host "[2/3] Starting API..." -ForegroundColor Cyan
     $apiPath = Join-Path $rootDir "src\api-server.js"
     $null = Start-Process -FilePath "node" -ArgumentList $apiPath -WorkingDirectory $rootDir -PassThru -WindowStyle Hidden
-    Write-Host "等待 API 就绪 (最多 15s)..." -ForegroundColor Yellow
+    Write-Host "Waiting for API (max 15s)..." -ForegroundColor Yellow
     $waited = 0
     while (-not (Test-ApiReady) -and $waited -lt 15) {
         Start-Sleep -Seconds 1
         $waited++
     }
     if (-not (Test-ApiReady)) {
-        Write-Host "API 启动超时。请手动运行: npm run api" -ForegroundColor Red
+        Write-Host "API startup timeout. Run: npm run api" -ForegroundColor Red
         exit 1
     }
-    Write-Host "API 已就绪 (http://127.0.0.1:$apiPort)" -ForegroundColor Green
+    Write-Host "API ready (http://127.0.0.1:$apiPort)" -ForegroundColor Green
 } else {
-    Write-Host "[2/3] API 已运行 (http://127.0.0.1:$apiPort)" -ForegroundColor Green
+    Write-Host "[2/3] API running (http://127.0.0.1:$apiPort)" -ForegroundColor Green
 }
 
-# ── 3. Agent ───────────────────────────────────────────────
-Write-Host "[3/3] 启动智能体..." -ForegroundColor Cyan
+# 3. Agent
+Write-Host "[3/3] Starting agent..." -ForegroundColor Cyan
 & (Join-Path $scriptDir "run-agent.ps1") @Message

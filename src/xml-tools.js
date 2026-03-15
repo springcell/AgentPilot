@@ -1,14 +1,14 @@
 /**
- * OpenClaw 风格 XML 工具解析
- * 格式 1: <function_calls><invoke name="tool"><parameter name="arg">val</parameter></invoke></function_calls>
- * 格式 2: <tool_call id="..." name="Bash">{"command":"ls"}</tool_call> (OpenClaw 兼容)
+ * OpenClaw-style XML tool parsing
+ * Format 1: <function_calls><invoke name="tool"><parameter name="arg">val</parameter></invoke></function_calls>
+ * Format 2: <tool_call name="Bash">{"command":"ls"}</tool_call>
  */
 
 const INVOKE_REG = /<invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/gi;
 const PARAM_REG = /<parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
 const TOOL_CALL_REG = /<tool_call\s+[^>]*name="([^"]+)"[^>]*>([\s\S]*?)<\/tool_call>/gi;
 
-/** OpenClaw 工具名 -> AgentPilot 工具名 */
+/** OpenClaw tool name -> AgentPilot tool name */
 const OPENCLAW_NAME_MAP = {
   bash: 'run_command',
   exec: 'run_command',
@@ -78,7 +78,7 @@ export function parseToolCalls(text) {
   return calls;
 }
 
-/** 占位符/无效命令，不执行 */
+/** Placeholder/invalid commands - do not execute */
 const PLACEHOLDER_TEXTS = ['command to run', 'command string', 'command', 'actual command', 'user command', 'YOUR_COMMAND', 'specific command'];
 
 function isValidCommand(cmd) {
@@ -88,26 +88,21 @@ function isValidCommand(cmd) {
 }
 
 /**
- * 从回复中精确提取 run_command 调用（XML 优先，代码块兜底）
- * 当 ChatGPT 返回 XML 工具调用但声称 "tool unavailable" 时，仍能提取并执行
- * @param {string} text - 模型完整回复
+ * Extract run_command calls from reply (XML first, code block fallback)
+ * @param {string} text - Full model reply
  * @returns {Array<{name: string, arguments: object}>}
  */
 export function extractRunCommandsFromReply(text) {
   if (!text || typeof text !== 'string') return [];
   const results = [];
-
-  // 1. 优先从 XML 解析
   const xmlCalls = parseToolCalls(text).filter(tc => tc.name === 'run_command');
   for (const tc of xmlCalls) {
     const cmd = tc.arguments?.command;
     if (isValidCommand(cmd)) results.push({ name: 'run_command', arguments: { command: String(cmd).trim() } });
   }
 
-  // 2. 兜底：当 ChatGPT 拒绝执行但给出手动命令时，从代码块或正文提取
   const refusedMatch = /无法|不能直接执行|不允许|unavailable|不可用|已被禁用|can't|cannot|don't have access/i.test(text);
   if (results.length === 0 && refusedMatch) {
-    // 2a. ``` 代码块
     const codeBlockReg = /```(?:powershell|bash|sh|cmd|shell)?\s*\n([\s\S]*?)```/gi;
     let m;
     while ((m = codeBlockReg.exec(text)) !== null) {
@@ -121,7 +116,6 @@ export function extractRunCommandsFromReply(text) {
         break;
       }
     }
-    // 2b. 无 ``` 时，从正文匹配 Start-Process xxx 或独立 notepad 行（ChatGPT 常以「PowerShell\nStart-Process notepad」形式给出）
     if (results.length === 0) {
       const startProcessMatch = text.match(/(?:^|\n)\s*(Start-Process\s+\S+[^\n]*)/im);
       const notepadLineMatch = text.match(/(?:PowerShell|cmd|方法\s*\d)[)\s]*\n\s*(notepad\b|Start-Process\s+notepad[^\n]*)/im);
@@ -138,9 +132,7 @@ export function extractRunCommandsFromReply(text) {
   return results;
 }
 
-/**
- * 从回复中移除工具调用块，返回纯文本
- */
+/** Remove tool-call blocks from reply, return plain text */
 export function stripToolCalls(text) {
   if (!text || typeof text !== 'string') return text;
   return text
@@ -149,9 +141,7 @@ export function stripToolCalls(text) {
     .trim();
 }
 
-/**
- * 移除 prompt 回显（available_tools、User: 等），避免污染用户可见输出
- */
+/** Remove prompt echo (available_tools, User:, etc.) from visible output */
 export function stripPromptArtifacts(text) {
   if (!text || typeof text !== 'string') return text;
   return text
@@ -161,7 +151,7 @@ export function stripPromptArtifacts(text) {
 }
 
 /**
- * 生成工具描述的 XML 格式（用于注入 prompt）
+ * Format tools as XML for prompt injection
  * @param {Array<{name: string, description: string, parameters?: object}>} tools
  */
 export function formatToolsXml(tools) {

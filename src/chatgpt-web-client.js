@@ -1,10 +1,7 @@
 /**
- * ChatGPT Web Client - 通过 Chrome CDP + DOM 模拟完成聊天
- * 
- * 认证: CDP 连接 → 打开 chatgpt.com → 等待登录 (检测 cookie) → 返回 cookie + userAgent
- * 聊天: DOM 模拟 - 填输入框、点发送、轮询 DOM 取最后一条模型回复
- * 
- * 参考: https://github.com/linuxhsj/openclaw-zero-token
+ * ChatGPT Web Client - chat via Chrome CDP + DOM
+ * Auth: CDP -> open chatgpt.com -> wait for login (cookie) -> return cookie + userAgent
+ * Chat: DOM - fill input, click send, poll DOM for last model reply
  */
 
 import puppeteer from 'puppeteer-core';
@@ -15,9 +12,7 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_CACHE_PATH = path.join(__dirname, '..', '.chatgpt-auth.json');
 
-// ChatGPT 网页 DOM 选择器 (随官网更新可能需要调整)
 const SELECTORS = {
-  // 主输入区域 - ChatGPT 使用 contenteditable div 或 textarea
   input: [
     '#prompt-textarea',
     'textarea[data-id="root"]',
@@ -31,7 +26,6 @@ const SELECTORS = {
     'button[type="submit"]',
     'form button[type="submit"]',
   ],
-  // 最后一条模型回复（ChatGPT 官网 DOM 可能变化，多备选）
   lastReply: [
     '[data-message-author-role="assistant"]',
     '[data-testid="conversation-turn"]',
@@ -41,7 +35,6 @@ const SELECTORS = {
     'article',
     '[class*="Message"]',
   ],
-  // 检测已登录 (有用户菜单或新对话按钮)
   loggedIn: [
     '[data-testid="user-menu"]',
     'button[aria-label*="New chat"]',
@@ -50,9 +43,7 @@ const SELECTORS = {
   ],
 };
 
-/**
- * 连接已启动的 Chrome (需带 --remote-debugging-port=9222)
- */
+/** Connect to already-running Chrome (--remote-debugging-port=9222) */
 export async function connectChrome(cdpUrl = 'http://127.0.0.1:9222') {
   const browser = await puppeteer.connect({
     browserURL: cdpUrl,
@@ -98,11 +89,7 @@ export async function disconnectBrowser() {
   _connectingPromise = null;
 }
 
-/**
- * 认证流程: 打开 chatgpt.com，等待用户登录，抓取 cookie + userAgent
- * 注意: 使用 connectChrome() 创建独立临时连接，不共用 getBrowser() 单例，
- * 认证结束后 browser.disconnect() 关闭，不影响 chat() 使用的 browserInstance
- */
+/** Auth: open chatgpt.com, wait for login, capture cookie + userAgent */
 export async function auth(cdpUrl = 'http://127.0.0.1:9222', chatgptUrl = 'https://chatgpt.com/') {
   const browser = await connectChrome(cdpUrl);
   const pages = await browser.pages();
@@ -115,7 +102,6 @@ export async function auth(cdpUrl = 'http://127.0.0.1:9222', chatgptUrl = 'https
     await page.bringToFront();
   }
 
-  // 等待登录: 轮询检测 cookie 或登录标识
   const authTimeoutMs = 120000;
   const pollInterval = 2000;
   const start = Date.now();
@@ -151,15 +137,12 @@ export async function auth(cdpUrl = 'http://127.0.0.1:9222', chatgptUrl = 'https
   throw new Error('Auth timeout: Please log in at https://chatgpt.com/ within 2 minutes');
 }
 
-/**
- * 加载缓存的认证信息
- */
 function loadAuth() {
   if (!fs.existsSync(AUTH_CACHE_PATH)) return null;
   try {
     return JSON.parse(fs.readFileSync(AUTH_CACHE_PATH, 'utf-8'));
   } catch (e) {
-    console.warn('[auth] Cache corrupted, ignore:', e.message);
+    console.warn('[auth] Cache corrupted, ignoring:', e.message);
     return null;
   }
 }
@@ -295,7 +278,6 @@ async function doChat(message, options = {}) {
 
   await page.click(inputSelector);
 
-  // ChatGPT 使用 ProseMirror contenteditable，需用 native setter 或 execCommand 才能更新 React 状态
   const filled = await page.evaluate((sel, text) => {
     const el = document.querySelector(sel);
     if (!el) return false;
@@ -339,12 +321,10 @@ async function doChat(message, options = {}) {
   const sendSelector = await waitForSelector(page, SELECTORS.sendButton, waitOpts);
   if (!sendSelector) throw new Error('Send button not found');
 
-  // 发送前记录最后一条回复内容与条数，用于判断是否收到新回复
   const prevLastText = await getLastReplyText(page);
   const prevCount = await getReplyCount(page);
   await page.click(sendSelector);
 
-  // ── 中间状态模式：匹配时永不提前返回 ──────────────────────
   const _INTER_RE = [
     /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
     /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
@@ -355,7 +335,6 @@ async function doChat(message, options = {}) {
   let lastText = '';
   let stableCount = 0;
   const STABLE_POLLS = 4;
-  // 短回复（如占位符）需更多轮稳定，避免在完整 JSON 渲染前提前返回
   const MIN_LEN_FOR_QUICK_STABLE = 150;
 
   while (Date.now() - start < pollTimeoutMs) {
@@ -374,16 +353,14 @@ async function doChat(message, options = {}) {
     const text = await getLastReplyText(page);
     if (!text || text.length < 2) continue;
 
-    // count 增加或文本变化，才算新回复
     if (count <= prevCount && text === prevLastText) continue;
 
     if (text === lastText) {
       stableCount++;
       const requiredStable = (text.length < MIN_LEN_FOR_QUICK_STABLE && !text.includes('"command"'))
-        ? 10  // 短回复且无 JSON 特征时多等几轮，避免占位符被误判为完成
+        ? 10
         : STABLE_POLLS;
       if (stableCount >= requiredStable) {
-        // ── 关键修复：中间状态时重置计数，继续等待真实回复 ──
         if (_isIntermediate(text)) {
           stableCount = 0;
           continue;
@@ -452,7 +429,6 @@ async function getLastReplyText(page) {
 
     const isValidReply = (t) => t && t.length > 3 && !isPromptLike(t) && !isScriptLike(t);
 
-    // 策略 1: 取最后一条 assistant 消息
     let els = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (els.length > 0) {
       for (let i = els.length - 1; i >= 0; i--) {
@@ -463,7 +439,6 @@ async function getLastReplyText(page) {
       return isScriptLike(last) ? '' : last || '';
     }
 
-    // 策略 2: conversation-turn
     els = document.querySelectorAll('[data-testid="conversation-turn"]');
     if (els.length > 0) {
       for (let i = els.length - 1; i >= 0; i--) {
@@ -474,7 +449,6 @@ async function getLastReplyText(page) {
       }
     }
 
-    // 策略 3: 主区域最后一段
     const main = document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const all = main.querySelectorAll('div[class*="markdown"], div[class*="prose"], article');
     for (let i = all.length - 1; i >= 0; i--) {
@@ -486,7 +460,6 @@ async function getLastReplyText(page) {
   });
 }
 
-// CLI 入口
 const args = process.argv.slice(2);
 if (args[0] === 'auth') {
   auth().then(d => console.log('Auth OK:', Object.keys(d))).catch(e => { console.error(e); process.exit(1); });

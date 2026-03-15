@@ -1,7 +1,7 @@
 /**
- * AgentPilot - 纯对话入口
- * POST /chat - 通过 ChatGPT Web 对话
- * CLI: node agent.js [message] 或 无参数时启动交互
+ * AgentPilot - Chat entry
+ * POST /chat - Chat via ChatGPT Web
+ * CLI: node agent.js [message] or no args for interactive
  */
 import express from 'express';
 import fs from 'fs';
