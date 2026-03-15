@@ -1,6 +1,6 @@
 # AgentPilot
 
-Drive local chat and task execution via ChatGPT web; no API key required.
+Drive local chat and task execution via ChatGPT web — **no API key, no token limits, unlimited use.**
 
 ---
 
