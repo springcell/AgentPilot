@@ -1,0 +1,21 @@
+{
+  "name": "write_article",
+  "category": "write_doc",
+  "identity": "writer",
+  "reviewer": "reviewer_doc",
+  "flow": "default",
+  "description": "写文章、文案或报告",
+  "patterns": [
+    "写文章", "写稿", "文案", "报告", "稿子", "write article", "blog post",
+    "内容创作", "copywriting", "新闻稿", "公告", "write report"
+  ],
+  "rules": [
+    "先确认目标读者和风格（正式/非正式）。",
+    "内容写完后用 file_op write 保存到指定路径或桌面。",
+    "不要只输出文字，必须用 JSON 块完成保存操作。"
+  ],
+  "steps": [],
+  "notes": "输出 .txt 或 .md 文件；若需 .docx 则用 python-docx 脚本生成。",
+  "success_count": 0,
+  "last_used": ""
+}

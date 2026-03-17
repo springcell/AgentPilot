@@ -1,0 +1,21 @@
+{
+  "name": "translate",
+  "category": "general",
+  "identity": "translator",
+  "reviewer": "reviewer_doc",
+  "flow": "default",
+  "description": "将内容翻译为目标语言",
+  "patterns": [
+    "翻译", "translate", "本地化", "localization", "中译英", "英译中",
+    "日译中", "translate to", "翻成", "转换语言"
+  ],
+  "rules": [
+    "保留原文格式（换行、标点、代码块等）。",
+    "翻译完成后用 file_op write 保存到指定路径或桌面。",
+    "若任务只需输出译文（无指定保存路径），直接在回复中输出。"
+  ],
+  "steps": [],
+  "notes": "无需 JSON 块时可直接输出译文；有保存需求时必须输出 write 块。",
+  "success_count": 0,
+  "last_used": ""
+}

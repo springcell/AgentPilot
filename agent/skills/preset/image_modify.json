@@ -1,0 +1,23 @@
+{
+  "name": "image_modify",
+  "category": "image_modify",
+  "identity": "painter",
+  "reviewer": "reviewer_image",
+  "flow": "file_chat_first",
+  "description": "修改已有图片/二进制文件（上传原文件 → file-chat → 捕获下载 → 保存）",
+  "patterns": [
+    "细化", "修改", "优化", "美化", "修复", "调整", "改进", "增强",
+    "重绘", "润色", "编辑", "refine", "improve", "enhance", "fix",
+    "edit", "modify", "adjust", "update", "transform", "resize",
+    "crop", "rotate", "recolor", "rework", "beautify", "change"
+  ],
+  "rules": [
+    "将本地文件上传给 ChatGPT 进行修改，不要输出 JSON 块。",
+    "不要用文字描述结果，必须输出可下载的修改后文件。",
+    "如果 ChatGPT 询问确认修改，回答是并等待下载。"
+  ],
+  "steps": [],
+  "notes": "需要任务中包含已存在的本地文件路径。",
+  "success_count": 0,
+  "last_used": ""
+}

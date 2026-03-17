@@ -1,0 +1,30 @@
+{
+  "name": "control_system",
+  "category": "control_system",
+  "identity": "system",
+  "reviewer": "",
+  "flow": "control_only",
+  "description": "Launch programs, run local system commands, and manage local files or folders.",
+  "patterns": [
+    "启动", "打开", "运行", "launch", "open", "start", ".exe",
+    "删除", "清理", "移除", "remove", "delete", "cleanup",
+    "桌面", "desktop", "文件", "目录", "folder", "directory",
+    "图片", "image", "photo", "png", "jpg", "jpeg"
+  ],
+  "rules": [
+    "Program launch tasks: use file_op find_program first, then file_op launch.",
+    "Local file management tasks: use file_op list/find/read/delete/move/copy/tree/exists/stat directly.",
+    "For delete or cleanup tasks, inspect the directory first, then delete the matched files with explicit file_op delete blocks.",
+    "Do not claim access restrictions when the path is already known locally.",
+    "System shell commands should use powershell or cmd blocks."
+  ],
+  "steps": [
+    {"command": "file_op", "action": "list", "path": "<target_dir>"},
+    {"command": "file_op", "action": "delete", "path": "<matched_file_path>"},
+    {"command": "file_op", "action": "find_program", "name": "<program_name>"},
+    {"command": "file_op", "action": "launch", "path": "<resolved_program_path>"}
+  ],
+  "notes": "Use launch for programs and direct file_op actions for file management or cleanup tasks.",
+  "success_count": 0,
+  "last_used": ""
+}

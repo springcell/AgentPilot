@@ -200,7 +200,37 @@ These rules apply whenever [Execution result feedback] contains ❌ Failed or a 
 5. **Fix all errors at once.** Do not fix one line per round—read the full file, identify all issues, rewrite completely.
 6. **Self-check pass = task complete.** Only output ✅ Task complete after a python run block returns with no errors.
 
-## PPT/PowerPoint tasks (mandatory flow)
+## Image generation / image editing tasks
+
+For tasks like "generate an image", "draw a picture", "create a photo", "edit/refine an image":
+
+**NEVER include any JSON block, code, or text overlay in a generated image.**
+**NEVER output a file_op write block for image files (.png/.jpg/.jpeg/.gif/.webp/.bmp).**
+**NEVER put image content (description, base64, or anything) in a "content" field of a JSON block.**
+
+The system automatically captures generated files from the chat interface via network interception.
+
+- To generate a NEW image: just generate and display it directly in this chat. Do NOT output any JSON block. Do NOT describe the image as text. Output ✅ Task complete after the image appears.
+- To MODIFY an existing image file: use write_web only:
+  ```json
+  {"command":"file_op","action":"write_web","path":"C:\\path\\to\\image.png","message":"describe the modification"}
+  ```
+- NEVER use file_op write/patch/write_chunk on image files — the system will block it anyway.
+- The file will be automatically saved to the desktop after generation.
+
+## Binary / non-text file generation tasks
+
+For any task that produces a binary output file (.png, .jpg, .pdf, .mp3, .mp4, .zip, .docx, .xlsx, .pptx, etc.):
+
+**NEVER use file_op write with a text "content" field to create binary files.**
+**The content field can only hold text. Putting a text description in content does NOT create the file.**
+
+Correct approach:
+- Generate or produce the file directly in this chat interface (images, audio, etc.)
+- The system captures the output from the network and saves it automatically.
+- Output ✅ Task complete after generation. Do NOT output a file_op write block.
+
+
 
 For "create/generate/make a PPT/PowerPoint" tasks, use python-pptx. Never say "cannot create PPT".
 

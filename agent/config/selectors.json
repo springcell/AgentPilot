@@ -1,0 +1,61 @@
+{
+  "input_box": [
+    "#prompt-textarea",
+    "textarea[data-id=\"root\"]",
+    "[contenteditable=\"true\"][data-placeholder]",
+    "div[contenteditable=\"true\"]",
+    "textarea"
+  ],
+  "send_button": [
+    "button[data-testid=\"send-button\"]",
+    "button[aria-label*=\"Send\"]",
+    "button[type=\"submit\"]",
+    "form button[type=\"submit\"]"
+  ],
+  "send_button_clickable": [
+    "button[data-testid=\"send-button\"]:not([disabled])",
+    "button[aria-label*=\"Send\"]:not([disabled])",
+    "button[type=\"submit\"]:not([disabled])"
+  ],
+  "attach_button": [
+    "button[aria-label*=\"Attach\"]",
+    "button[aria-label*=\"attach\"]",
+    "button[aria-label*=\"Upload\"]",
+    "button[aria-label*=\"upload\"]",
+    "button[data-testid*=\"attach\"]",
+    "label[for*=\"file\"]",
+    "button[aria-label*=\"file\"]",
+    "label[aria-label*=\"Attach\"]"
+  ],
+  "file_input": [
+    "input[type=\"file\"]",
+    "input[accept]"
+  ],
+  "upload_spinner": [
+    "[aria-label*=\"Uploading\"]",
+    "[data-testid*=\"upload-progress\"]",
+    ".animate-spin"
+  ],
+  "attachment_chip": [
+    "[data-testid*=\"attachment\"]",
+    "[data-testid*=\"file-chip\"]",
+    "[data-testid*=\"composer-attachment\"]",
+    "button[aria-label*=\"Remove file\"]",
+    "button[aria-label*=\"remove file\"]",
+    "button[aria-label*=\"移除\"]"
+  ],
+  "reply_area": [
+    "[data-message-author-role=\"assistant\"]",
+    "[data-testid=\"conversation-turn\"]",
+    "div[data-message-id]",
+    "[class*=\"markdown\"]",
+    "div.markdown",
+    "article"
+  ],
+  "logged_in": [
+    "[data-testid=\"user-menu\"]",
+    "button[aria-label*=\"New chat\"]",
+    "a[href=\"/\"]",
+    "nav"
+  ]
+}

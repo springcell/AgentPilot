@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op"}
+SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op", "request_help"}
+_WINDOWS_PATH_JSON_FIELDS = ("path", "dst", "src", "file_path", "target_file")
 
 
 # ──────────────────────────────────────────────────────────
@@ -51,6 +52,16 @@ def _clean(raw: str) -> str:
 def _fix_json(raw: str) -> str:
     """一系列宽松修复，不改变语义"""
     s = _clean(raw)
+    fields = "|".join(re.escape(name) for name in _WINDOWS_PATH_JSON_FIELDS)
+    path_pattern = re.compile(
+        rf'("(?P<key>{fields})"\s*:\s*")(?P<value>(?:[^"\\]|\\.)*)(")',
+        re.IGNORECASE,
+    )
+
+    def _escape_path_value(match):
+        return match.group(0)
+
+    s = path_pattern.sub(_escape_path_value, s)
 
     # 删除单行 // 注释（不在字符串内的）
     s = re.sub(r'(?<!["\w])//[^\n]*', '', s)
@@ -63,6 +74,20 @@ def _fix_json(raw: str) -> str:
     s = re.sub(r":\s*'([^']*)'", r': "\1"', s)
     # 修复裸反斜杠（Windows 路径）：\ 后不是 "\/bfnrtu 就加转义
     s = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
+
+    fields = "|".join(re.escape(name) for name in _WINDOWS_PATH_JSON_FIELDS)
+    path_pattern = re.compile(
+        rf'("(?P<key>{fields})"\s*:\s*")(?P<value>(?:[^"\\]|\\.)*)(")',
+        re.IGNORECASE,
+    )
+
+    def _normalize_path_value(match):
+        value = match.group("value")
+        value = re.sub(r'(?<!\\)\\(?!\\)', r'\\\\', value)
+        value = re.sub(r'\\\\{3,}', r'\\\\', value)
+        return f'{match.group(1)}{value}{match.group(4)}'
+
+    s = path_pattern.sub(_normalize_path_value, s)
 
     return s
 
@@ -193,6 +218,24 @@ def _s6_multi_block(text: str) -> list:
     return results
 
 
+def _s7_inline_command_object(text: str) -> list:
+    """策略7: 在自然语言中围绕 "command" 锚点回溯提取最近的 JSON 对象"""
+    results = []
+    seen: set[str] = set()
+    for match in re.finditer(r'"command"\s*:', text, re.IGNORECASE):
+        brace_start = text.rfind("{", 0, match.start())
+        if brace_start == -1:
+            continue
+        block = _extract_brace_block(text, brace_start)
+        if not block:
+            continue
+        if block in seen:
+            continue
+        seen.add(block)
+        results.append(block)
+    return results
+
+
 # ──────────────────────────────────────────────────────────
 # 主解析入口
 # ──────────────────────────────────────────────────────────
@@ -201,6 +244,7 @@ _STRATEGIES = [
     ("标准代码块 ```json```", _s1_fenced_json),
     ("无标记代码块 ```...```", _s2_fenced_any),
     ("裸标记行 JSON\\n{...}", _s3_bare_label),
+    ("自然语言中的内联 JSON 对象", _s7_inline_command_object),
     ("首个大括号", _s4_first_brace),
     ("宽松花括号扫描", _s5_loose_brace),
     ("全文多块提取", _s6_multi_block),

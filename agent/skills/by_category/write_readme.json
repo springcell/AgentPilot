@@ -1,0 +1,21 @@
+{
+  "name": "write_readme",
+  "category": "write_doc",
+  "identity": "tech_writer",
+  "reviewer": "reviewer_doc",
+  "flow": "default",
+  "description": "生成 README、API 文档或技术说明",
+  "patterns": [
+    "readme", "api文档", "api doc", "技术文档", "说明文档", "接口文档",
+    "write docs", "generate docs", "文档生成", "接口说明"
+  ],
+  "rules": [
+    "先用 file_op read 读取相关代码或现有文档，理解结构。",
+    "生成的文档用 file_op write 保存为 .md 文件。",
+    "使用 Markdown 格式，含示例代码块。"
+  ],
+  "steps": [],
+  "notes": "输出标准 Markdown 文件，代码引用使用 ``` 块。",
+  "success_count": 0,
+  "last_used": ""
+}

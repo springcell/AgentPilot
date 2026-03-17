@@ -1,0 +1,41 @@
+## file_op file operations
+
+Use command: "file_op" for local files:
+
+```json
+{"command":"file_op","action":"<action>","path":"<path>","<key>":"<value>"}
+```
+
+| action       | Required             | Optional                          |
+| list         | path                 |                                   |
+| find         | path                 | pattern regex max_depth           |
+| read         | path                 | line_start line_end               |
+| write        | path content         | encoding backup                   |
+| write_chunk  | path content         | line_start line_end encoding backup |
+| append       | path content         | newline backup                    |
+| patch        | path replacements    | use_regex backup                  |
+| insert       | path line content    | after backup                      |
+| delete_lines | path line_start      | line_end backup                   |
+| mkdir        | path                 |                                   |
+| copy         | src dst              |                                   |
+| move         | src dst              |                                   |
+| delete       | path                 | force                             |
+| exists       | path                 |                                   |
+| tree         | path                 | max_depth                         |
+| find_program | name                 |                                   |
+| launch       | path or name         | args wait                         |
+| backup       | path                 |                                   |
+| history      | path                 |                                   |
+| restore      | path                 | backup (path/"latest"/"oldest")   |
+| read_web     | path                 | message agent_id                  |
+| write_web    | path message         | agent_id backup encoding          |
+
+write_chunk replaces only lines line_start..line_end; other lines are preserved.
+Use write_chunk for large files to avoid truncation issues.
+backup/history/restore let you view and revert to previous versions.
+read_web  — upload file to ChatGPT Web and return its analysis (supports any file type).
+write_web — upload file to ChatGPT Web with a modification instruction, write the returned
+            content back to dst (defaults to overwriting path). Use for binary/image files.
+            Example (modify image and save to desktop):
+            {"command":"file_op","action":"write_web","path":"C:\\source.png","dst":"C:\\Users\\admin\\Desktop\\output.png","message":"Refine the details"}
+Paths support %USERPROFILE% %DESKTOP% etc.

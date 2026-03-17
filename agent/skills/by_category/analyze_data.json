@@ -1,0 +1,30 @@
+{
+  "name": "analyze_data",
+  "category": "write_doc",
+  "identity": "analyst",
+  "reviewer": "reviewer_doc",
+  "flow": "script_then_run",
+  "description": "数据分析、表格处理或可视化",
+  "patterns": [
+    "数据分析", "表格", "excel", ".xlsx", "可视化", "图表", "统计",
+    "analyze data", "data analysis", "visualization", "pivot table", "pandas"
+  ],
+  "rules": [
+    "用 python (pandas/openpyxl/matplotlib) 处理数据。",
+    "写完 .py 脚本后立即执行验证无错误。",
+    "输出文件（图表/Excel）保存到指定路径或桌面。"
+  ],
+  "loop_policy": {
+    "artifact_extensions": [".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg", ".pdf"],
+    "script_extensions": [".py"],
+    "require_script_execution": true,
+    "require_artifact": true
+  },
+  "steps": [
+    {"command": "file_op", "action": "write", "path": "<desktop>\\analyze.py", "content": "import pandas as pd\\n# ..."},
+    {"command": "python", "path": "<desktop>\\analyze.py"}
+  ],
+  "notes": "需要 pandas/openpyxl：pip install pandas openpyxl matplotlib",
+  "success_count": 0,
+  "last_used": ""
+}

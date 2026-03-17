@@ -11,8 +11,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_CACHE_PATH = path.join(__dirname, '..', '.chatgpt-auth.json');
+const SELECTORS_CONFIG_PATH = path.join(__dirname, '..', 'agent', 'config', 'selectors.json');
 
-const SELECTORS = {
+const DEFAULT_SELECTORS = {
   input: [
     '#prompt-textarea',
     'textarea[data-id="root"]',
@@ -25,6 +26,33 @@ const SELECTORS = {
     'button[aria-label*="Send"]',
     'button[type="submit"]',
     'form button[type="submit"]',
+  ],
+  attachButton: [
+    'button[aria-label*="Attach"]',
+    'button[aria-label*="attach"]',
+    'button[aria-label*="Upload"]',
+    'button[aria-label*="upload"]',
+    'button[data-testid*="attach"]',
+    'label[for*="file"]',
+    'button[aria-label*="file"]',
+    'label[aria-label*="Attach"]',
+  ],
+  fileInput: [
+    'input[type="file"]',
+    'input[accept]',
+  ],
+  uploadSpinner: [
+    '[aria-label*="Uploading"]',
+    '[data-testid*="upload-progress"]',
+    '.animate-spin',
+  ],
+  attachmentChip: [
+    '[data-testid*="attachment"]',
+    '[data-testid*="file-chip"]',
+    '[data-testid*="composer-attachment"]',
+    'button[aria-label*="Remove file"]',
+    'button[aria-label*="remove file"]',
+    'button[aria-label*="移除"]',
   ],
   lastReply: [
     '[data-message-author-role="assistant"]',
@@ -42,6 +70,62 @@ const SELECTORS = {
     'nav',
   ],
 };
+
+function loadSelectors() {
+  try {
+    if (!fs.existsSync(SELECTORS_CONFIG_PATH)) return DEFAULT_SELECTORS;
+    const loaded = JSON.parse(fs.readFileSync(SELECTORS_CONFIG_PATH, 'utf-8'));
+    return {
+      input: loaded.input_box?.length ? loaded.input_box : DEFAULT_SELECTORS.input,
+      sendButton: loaded.send_button?.length ? loaded.send_button : DEFAULT_SELECTORS.sendButton,
+      sendButtonClickable: loaded.send_button_clickable?.length ? loaded.send_button_clickable : [],
+      attachButton: loaded.attach_button?.length ? loaded.attach_button : DEFAULT_SELECTORS.attachButton,
+      fileInput: loaded.file_input?.length ? loaded.file_input : DEFAULT_SELECTORS.fileInput,
+      uploadSpinner: loaded.upload_spinner?.length ? loaded.upload_spinner : DEFAULT_SELECTORS.uploadSpinner,
+      attachmentChip: loaded.attachment_chip?.length ? loaded.attachment_chip : DEFAULT_SELECTORS.attachmentChip,
+      lastReply: loaded.reply_area?.length ? loaded.reply_area : DEFAULT_SELECTORS.lastReply,
+      loggedIn: loaded.logged_in?.length ? loaded.logged_in : DEFAULT_SELECTORS.loggedIn,
+    };
+  } catch (e) {
+    console.warn('[selectors] Config load failed, using defaults:', e.message);
+    return DEFAULT_SELECTORS;
+  }
+}
+
+const SELECTORS = loadSelectors();
+
+async function getComposerUploadState(page) {
+  return page.evaluate((selectors) => {
+    const hasAny = (list) => Array.isArray(list) && list.some((sel) => {
+      try { return !!document.querySelector(sel); } catch (_) { return false; }
+    });
+    return {
+      uploadInProgress: hasAny(selectors.uploadSpinner),
+      hasAttachmentChip: hasAny(selectors.attachmentChip),
+      hasFileInput: hasAny(selectors.fileInput),
+      hasAttachButton: hasAny(selectors.attachButton),
+    };
+  }, {
+    uploadSpinner: SELECTORS.uploadSpinner ?? [],
+    attachmentChip: SELECTORS.attachmentChip ?? [],
+    fileInput: SELECTORS.fileInput ?? [],
+    attachButton: SELECTORS.attachButton ?? [],
+  }).catch(() => ({
+    uploadInProgress: false,
+    hasAttachmentChip: false,
+    hasFileInput: false,
+    hasAttachButton: false,
+  }));
+}
+
+function looksLikeRoutingReply(text) {
+  const cleaned = (text || '').trim().replace(/^[\s\S]{0,30}?ChatGPT\s*[^\n]*[：:]\s*/i, '').trim();
+  if (!cleaned) return false;
+  return (
+    /^[\u4e00-\u9fa5a-zA-Z\s,，]+需要\s+[a-z_]+\s+去做[.!]?$/i.test(cleaned) ||
+    /^[\u4e00-\u9fa5a-zA-Z\s,，]+,\s*need\s+[a-z_]+\s+to\s+do\s+it[.!]?$/i.test(cleaned)
+  );
+}
 
 /** Connect to already-running Chrome (--remote-debugging-port=9222) */
 export async function connectChrome(cdpUrl = 'http://127.0.0.1:9222') {
@@ -328,13 +412,100 @@ async function doChat(message, options = {}) {
 
   const prevLastText = await getLastReplyText(page);
   const prevCount = await getReplyCount(page);
+
+  // ── File capture: Browser download + CDP network interception ─────────────
+  // Strategy 1 (preferred): After reply stabilises, find ChatGPT's download button and click it.
+  //   Chrome downloads the file natively → Browser.downloadProgress fires → read from disk.
+  // Strategy 2 (fallback): CDP Network.responseReceived captures binary responses in-flight.
+  // Both run in parallel; whichever fires first wins.
+  let _capturedFileBuf = null;
+  let _capturedFileExt = null;
+  let _dlFilename = null;
+
+  const _os = await import('os');
+  const _dlDir = _os.default.tmpdir();
+
+  const cdpSession = await page.createCDPSession().catch(() => null);
+  if (cdpSession) {
+    // Enable browser download events and redirect downloads to temp dir
+    await cdpSession.send('Browser.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: _dlDir,
+      eventsEnabled: true,
+    }).catch(() => {});
+
+    // Strategy 2: network-level interception for files from oaiusercontent.com
+    const _SKIP_CT = new Set(['text/html', 'application/json', 'text/javascript', 'text/css']);
+    const _dlRequests = {};
+    await cdpSession.send('Network.enable').catch(() => {});
+    cdpSession.on('Network.responseReceived', (evt) => {
+      const url = evt.response?.url ?? '';
+      const ct  = (evt.response?.mimeType ?? '').split(';')[0].trim();
+      if (!url.includes('oaiusercontent.com') && !url.includes('openai.com/backend-api/files')) return;
+      if (_SKIP_CT.has(ct) || ct.startsWith('text/') || ct === 'application/json') return;
+      _dlRequests[evt.requestId] = { url, ct };
+    });
+    cdpSession.on('Network.loadingFinished', async (evt) => {
+      if (!_dlRequests[evt.requestId]) return;
+      const { url, ct } = _dlRequests[evt.requestId];
+      try {
+        const r = await cdpSession.send('Network.getResponseBody', { requestId: evt.requestId });
+        const buf = r.base64Encoded ? Buffer.from(r.body, 'base64') : Buffer.from(r.body, 'utf-8');
+        if (buf.length < 100) return;
+        const extMap = {
+          'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+          'application/pdf': '.pdf',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+          'application/zip': '.zip', 'audio/mpeg': '.mp3', 'video/mp4': '.mp4',
+        };
+        const m = url.match(/\.(png|jpg|jpeg|gif|webp|pdf|docx?|xlsx?|pptx?|zip|mp3|mp4|wav)(\?|$)/i);
+        const ext = extMap[ct] ?? (m ? '.' + m[1].toLowerCase() : '.bin');
+        if (!_capturedFileBuf || buf.length > _capturedFileBuf.length) {
+          _capturedFileBuf = buf; _capturedFileExt = ext;
+          console.log(`[doChat] CDP-network captured: ${buf.length}B ext=${ext}`);
+        }
+      } catch (_) {}
+    });
+
+    // Strategy 1: browser native download events
+    let _dlGuid = null;
+    cdpSession.on('Browser.downloadWillBegin', (evt) => {
+      _dlGuid = evt.guid;
+      _dlFilename = evt.suggestedFilename || 'download';
+      console.log(`[doChat] browser download starting: ${_dlFilename}`);
+    });
+    cdpSession.on('Browser.downloadProgress', async (evt) => {
+      if (evt.state !== 'completed' || !_dlGuid || evt.guid !== _dlGuid) return;
+      const dlPath = path.join(_dlDir, _dlFilename);
+      try {
+        if (fs.existsSync(dlPath)) {
+          const buf = fs.readFileSync(dlPath);
+          const ext = path.extname(_dlFilename).toLowerCase() || '.bin';
+          _capturedFileBuf = buf; _capturedFileExt = ext;
+          console.log(`[doChat] browser download complete: ${dlPath} (${buf.length}B)`);
+          try { fs.unlinkSync(dlPath); } catch (_) {}
+        }
+      } catch (_) {}
+    });
+  }
+
   await page.click(sendSelector);
 
   const _INTER_RE = [
     /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
+    /正在创建/, /正在生成/, /正在处理/, /正在绘制/, /正在渲染/,
+    /正在上传/, /正在分析/, /正在修改/, /正在优化/,
     /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
+    /Creating/i, /Generating/i, /Processing/i, /Drawing/i, /Rendering/i,
+    /Uploading/i, /Analyzing/i, /Modifying/i,
   ];
-  const _isIntermediate = (t) => !t || t.trim().length < 15 || _INTER_RE.some(r => r.test(t));
+  const _isIntermediate = (t) => {
+    if (!t) return true;
+    if (looksLikeRoutingReply(t)) return false;
+    return t.trim().length < 15 || _INTER_RE.some(r => r.test(t));
+  };
 
   const start = Date.now();
   let lastText = '';
@@ -370,6 +541,40 @@ async function doChat(message, options = {}) {
           stableCount = 0;
           continue;
         }
+        // Reply is stable. Try to trigger a native browser download by clicking
+        // ChatGPT's download button (if present). Then wait up to 8s for download to complete.
+        if (!_capturedFileBuf) {
+          const clicked = await page.evaluate(() => {
+            // ChatGPT download button selectors (try all known patterns)
+            const selectors = [
+              'button[aria-label*="Download"]', 'button[aria-label*="download"]',
+              'a[download]', '[data-testid*="download"]',
+              'button[aria-label*="下载"]',
+            ];
+            for (const sel of selectors) {
+              const btns = document.querySelectorAll(sel);
+              // Click the last one (most recent reply)
+              if (btns.length) { btns[btns.length - 1].click(); return true; }
+            }
+            return false;
+          }).catch(() => false);
+          if (clicked) console.log('[doChat] clicked download button');
+          // Wait for download to complete (up to 8s)
+          if (!_capturedFileBuf) await new Promise(r => setTimeout(r, 4000));
+          if (!_capturedFileBuf) await new Promise(r => setTimeout(r, 4000));
+        }
+        await cdpSession?.detach().catch(() => {});
+        // Fallback: DOM image capture if download didn't fire
+        let fileBuf = _capturedFileBuf;
+        let fileExt = _capturedFileExt;
+        if (!fileBuf) {
+          fileBuf = await _captureLastReplyImage(page).catch(() => null);
+          if (fileBuf) fileExt = '.png';
+        }
+        if (fileBuf) {
+          console.log(`[doChat] returning file: ${fileBuf.length}B ext=${fileExt}`);
+          return { text, raw: text, downloadedContent: fileBuf, downloadedExt: fileExt };
+        }
         return { text, raw: text };
       }
     } else {
@@ -378,7 +583,13 @@ async function doChat(message, options = {}) {
     }
   }
 
-  if (lastText) return { text: lastText, raw: lastText };
+  // Poll timed out but we have partial text — return it as intermediate rather than throwing.
+  // api-server.js will detect generating=true and launch _pollDomUntilFinal to continue.
+  await cdpSession?.detach().catch(() => {});
+  if (_capturedFileBuf) {
+    return { text: lastText, raw: lastText, downloadedContent: _capturedFileBuf, downloadedExt: _capturedFileExt, generating: true };
+  }
+  if (lastText) return { text: lastText, raw: lastText, generating: true };
   throw new Error('Reply timeout');
 }
 
@@ -411,13 +622,15 @@ async function waitForSendButtonEnabled(page, selector, timeout = 60000) {
   const interval = 500;
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const enabled = await page.evaluate((sel) => {
+    const clickableSelector = SELECTORS.sendButtonClickable?.find(Boolean);
+    const enabled = await page.evaluate((sel, clickableSel) => {
+      if (clickableSel && document.querySelector(clickableSel)) return true;
       const el = document.querySelector(sel);
       if (!el) return false;
       return !el.disabled && !el.hasAttribute('disabled')
         && getComputedStyle(el).pointerEvents !== 'none'
         && !el.closest('[aria-disabled="true"]');
-    }, selector);
+    }, selector, clickableSelector);
     if (enabled) return true;
     await new Promise(r => setTimeout(r, interval));
   }
@@ -480,6 +693,451 @@ async function getLastReplyText(page) {
     const fallback = all.length ? getText(all[all.length - 1]) || '' : '';
     return isScriptLike(fallback) ? '' : fallback;
   });
+}
+
+// ── File upload chat ─────────────────────────────────────────────────────────
+
+/**
+ * Upload a local file to ChatGPT and send an optional message alongside it.
+ * Returns { text, raw } same as chat().
+ *
+ * @param {string} filePath  Absolute path to the file to upload
+ * @param {string} message   Text prompt to accompany the file (may be empty)
+ * @param {object} options   Same options as chat()
+ */
+export async function chatWithFile(filePath, message = '', options = {}) {
+  const id = options.agentId ?? 'default';
+  const prev = _agentQueues[id] ?? Promise.resolve();
+  _agentQueues[id] = prev
+    .catch(() => {})
+    .then(() => doChatWithFile(filePath, message, options));
+  return _agentQueues[id];
+}
+
+async function doChatWithFile(filePath, message, options = {}) {
+  const {
+    cdpUrl = 'http://127.0.0.1:9222',
+    chatgptUrl = 'https://chatgpt.com/',
+    pollIntervalMs = 500,
+    pollTimeoutMs = 180000,   // files may need more time
+    newChat = false,
+    pageReadyTimeoutMs = 15000,
+    agentId = 'default',
+  } = options;
+
+  if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+
+  const browser = await getBrowser(cdpUrl);
+  let page = agentPages[agentId];
+
+  if (agentId !== 'default') {
+    if (!page || !(await isPageAlive(page))) {
+      page = await browser.newPage();
+      const cached = loadAuth();
+      if (cached?.cookies?.length) {
+        await page.setCookie(...cached.cookies);
+        if (cached.userAgent) await page.setUserAgent(cached.userAgent);
+      }
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      agentPages[agentId] = page;
+    } else {
+      await page.bringToFront();
+    }
+  } else {
+    const pages = await browser.pages();
+    page = pages.find(p => p.url().includes('chatgpt.com'));
+    if (!page) {
+      page = await browser.newPage();
+      const cached = loadAuth();
+      if (cached?.cookies?.length) {
+        await page.setCookie(...cached.cookies);
+        if (cached.userAgent) await page.setUserAgent(cached.userAgent);
+      }
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+    } else {
+      await page.bringToFront();
+    }
+  }
+
+  if (newChat) {
+    const newChatBtn = await findFirst(page, ['button[aria-label*="New chat"]', 'a[href="/"]', '[data-testid="new-chat-button"]']);
+    if (newChatBtn) {
+      await page.click(newChatBtn);
+      await new Promise(r => setTimeout(r, 2000));
+    } else {
+      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+    }
+  }
+
+  const cfCheck = await checkCloudflareBlock(page);
+  if (cfCheck.blocked) {
+    await disconnectBrowser();
+    throw new Error(`CF_BLOCKED:Edge IP Restricted (1034)\nIP: ${cfCheck.ip}\nRay ID: ${cfCheck.rayId}`);
+  }
+
+  // -- Wait for page ready --
+  const waitOpts = { timeout: pageReadyTimeoutMs };
+  const inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
+  if (!inputSelector) throw new Error('Input box not found, ensure you are on chatgpt.com');
+
+  // -- Click the attach/upload button to reveal file input --
+  // ChatGPT uses a hidden <input type="file"> triggered by an attach button
+  const ATTACH_BTNS = SELECTORS.attachButton?.length ? SELECTORS.attachButton : [
+    'button[aria-label*="Attach"]',
+    'button[aria-label*="attach"]',
+    'button[aria-label*="Upload"]',
+    'button[aria-label*="upload"]',
+    'button[data-testid*="attach"]',
+    'label[for*="file"]',
+    'button[aria-label*="file"]',
+    'label[aria-label*="Attach"]',
+  ];
+
+  const FILE_INPUT_SELS = SELECTORS.fileInput?.length ? SELECTORS.fileInput : [
+    'input[type="file"]',
+    'input[accept]',
+  ];
+
+  // Strategy A: click the attach button first, then setInputFiles
+  let fileInputHandle = null;
+
+  const attachBtn = await findFirst(page, ATTACH_BTNS);
+  if (attachBtn) {
+    await page.click(attachBtn);
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  // Try to find a file input (may become visible after clicking attach)
+  for (const sel of FILE_INPUT_SELS) {
+    try {
+      fileInputHandle = await page.$(sel);
+      if (fileInputHandle) break;
+    } catch (_) {}
+  }
+
+  if (!fileInputHandle) {
+    // Strategy B: expose hidden input without clicking
+    await page.evaluate(() => {
+      const inputs = document.querySelectorAll('input[type="file"]');
+      inputs.forEach(el => {
+        el.style.display = 'block';
+        el.style.visibility = 'visible';
+        el.style.opacity = '1';
+        el.style.width = '1px';
+        el.style.height = '1px';
+        el.removeAttribute('hidden');
+      });
+    });
+    for (const sel of FILE_INPUT_SELS) {
+      try {
+        fileInputHandle = await page.$(sel);
+        if (fileInputHandle) break;
+      } catch (_) {}
+    }
+  }
+
+  if (!fileInputHandle) throw new Error('File upload input not found on ChatGPT page');
+
+  // -- Upload the file --
+  await fileInputHandle.uploadFile(filePath);
+  console.log(`[chatWithFile] uploaded: ${path.basename(filePath)}`);
+
+  // Wait for upload indicator to disappear (ChatGPT shows a spinner)
+  const UPLOAD_DONE_TIMEOUT = 30000;
+  const uploadStart = Date.now();
+  let uploadConfirmed = false;
+  while (Date.now() - uploadStart < UPLOAD_DONE_TIMEOUT) {
+    await new Promise(r => setTimeout(r, 500));
+    const uploadState = await getComposerUploadState(page);
+    if (uploadState.hasAttachmentChip) uploadConfirmed = true;
+    if (!uploadState.uploadInProgress && uploadConfirmed) break;
+  }
+  const finalUploadState = await getComposerUploadState(page);
+  if (finalUploadState.hasAttachmentChip) uploadConfirmed = true;
+  await new Promise(r => setTimeout(r, 500)); // small settle
+
+  // -- Type message (if any) --
+  if (message) {
+    await page.click(inputSelector);
+    const filled = await page.evaluate((sel, text) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.focus();
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        const proto = Object.getPrototypeOf(el);
+        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (descriptor?.set) descriptor.set.call(el, text);
+        else el.value = text;
+      } else {
+        try {
+          const r = document.createRange();
+          r.selectNodeContents(el);
+          const s = window.getSelection();
+          s.removeAllRanges();
+          s.addRange(r);
+          document.execCommand('insertText', false, text);
+        } catch (_) {
+          el.textContent = text;
+        }
+      }
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      return true;
+    }, inputSelector, message);
+
+    if (!filled) {
+      await page.type(inputSelector, message, { delay: 0 });
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  // -- Send --
+  const sendSelector = await waitForSelector(page, SELECTORS.sendButton, waitOpts);
+  if (!sendSelector) throw new Error('Send button not found');
+
+  await waitForSendButtonEnabled(page, sendSelector, 60000);
+
+  const prevLastText = await getLastReplyText(page);
+  const prevCount = await getReplyCount(page);
+
+  // ── File capture: same logic as doChat ────────────────────────────────────
+  // Strategy 1 (preferred): After reply stabilises, click ChatGPT's download button.
+  //   Chrome downloads the file natively → Browser.downloadProgress fires → read from disk.
+  // Strategy 2 (fallback): CDP Network.responseReceived captures binary from oaiusercontent CDN.
+  // Both run in parallel; whichever fires first wins.
+  let _capturedFileBuf = null;
+  let _capturedFileExt = null;
+  let _dlFilename = null;
+
+  const _os2 = await import('os');
+  const _dlDir2 = _os2.default.tmpdir();
+
+  const cdpSession = await page.createCDPSession().catch(() => null);
+  if (cdpSession) {
+    await cdpSession.send('Browser.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: _dlDir2,
+      eventsEnabled: true,
+    }).catch(() => {});
+
+    // Strategy 2: network-level interception for files from oaiusercontent.com
+    const _SKIP_CT2 = new Set(['text/html', 'application/json', 'text/javascript', 'text/css']);
+    const _dlRequests2 = {};
+    await cdpSession.send('Network.enable').catch(() => {});
+    cdpSession.on('Network.responseReceived', (evt) => {
+      const url = evt.response?.url ?? '';
+      const ct  = (evt.response?.mimeType ?? '').split(';')[0].trim();
+      if (!url.includes('oaiusercontent.com') && !url.includes('openai.com/backend-api/files')) return;
+      if (_SKIP_CT2.has(ct) || ct.startsWith('text/') || ct === 'application/json') return;
+      _dlRequests2[evt.requestId] = { url, ct };
+    });
+    cdpSession.on('Network.loadingFinished', async (evt) => {
+      if (!_dlRequests2[evt.requestId]) return;
+      const { url, ct } = _dlRequests2[evt.requestId];
+      try {
+        const r = await cdpSession.send('Network.getResponseBody', { requestId: evt.requestId });
+        const buf = r.base64Encoded ? Buffer.from(r.body, 'base64') : Buffer.from(r.body, 'utf-8');
+        if (buf.length < 100) return;
+        const extMap = {
+          'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+          'application/pdf': '.pdf',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+          'application/zip': '.zip', 'audio/mpeg': '.mp3', 'video/mp4': '.mp4',
+        };
+        const m = url.match(/\.(png|jpg|jpeg|gif|webp|pdf|docx?|xlsx?|pptx?|zip|mp3|mp4|wav)(\?|$)/i);
+        const ext = extMap[ct] ?? (m ? '.' + m[1].toLowerCase() : '.bin');
+        if (!_capturedFileBuf || buf.length > _capturedFileBuf.length) {
+          _capturedFileBuf = buf; _capturedFileExt = ext;
+          console.log(`[chatWithFile] CDP-network captured: ${buf.length}B ext=${ext}`);
+        }
+      } catch (_) {}
+    });
+
+    // Strategy 1: browser native download events
+    let _dlGuid = null;
+    cdpSession.on('Browser.downloadWillBegin', (evt) => {
+      _dlGuid = evt.guid;
+      _dlFilename = evt.suggestedFilename || 'download';
+      console.log(`[chatWithFile] browser download starting: ${_dlFilename}`);
+    });
+    cdpSession.on('Browser.downloadProgress', async (evt) => {
+      if (evt.state !== 'completed' || !_dlGuid || evt.guid !== _dlGuid) return;
+      const dlPath = path.join(_dlDir2, _dlFilename);
+      try {
+        if (fs.existsSync(dlPath)) {
+          const buf = fs.readFileSync(dlPath);
+          const ext = path.extname(_dlFilename).toLowerCase() || '.bin';
+          _capturedFileBuf = buf; _capturedFileExt = ext;
+          console.log(`[chatWithFile] browser download complete: ${dlPath} (${buf.length}B)`);
+          try { fs.unlinkSync(dlPath); } catch (_) {}
+        }
+      } catch (_) {}
+    });
+  }
+  // ── End download interception ──────────────────────────────────────────────
+
+  await page.click(sendSelector);
+
+  // -- Poll for reply --
+  const _INTER_RE = [
+    /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
+    /正在创建/, /正在生成/, /正在处理/, /正在绘制/, /正在渲染/,
+    /正在上传/, /正在分析/, /正在修改/, /正在优化/,
+    /Searching/i, /Thinking/i, /Looking up/i, /Browsing/i,
+    /Creating/i, /Generating/i, /Processing/i, /Drawing/i, /Rendering/i,
+    /Uploading/i, /Analyzing/i, /Modifying/i,
+  ];
+  const _isIntermediate = (t) => {
+    if (!t) return true;
+    if (looksLikeRoutingReply(t)) return false;
+    return t.trim().length < 15 || _INTER_RE.some(r => r.test(t));
+  };
+
+  const start = Date.now();
+  let lastText = '';
+  let stableCount = 0;
+  const STABLE_POLLS = 4;
+  const MIN_LEN_FOR_QUICK_STABLE = 150;
+
+  while (Date.now() - start < pollTimeoutMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const cfCheck2 = await checkCloudflareBlock(page);
+    if (cfCheck2.blocked) {
+      await disconnectBrowser();
+      throw new Error(`CF_BLOCKED:Edge IP Restricted (1034)\nIP: ${cfCheck2.ip}\nRay ID: ${cfCheck2.rayId}`);
+    }
+    const count = await getReplyCount(page);
+    const text = await getLastReplyText(page);
+    if (!text || text.length < 2) continue;
+    if (count <= prevCount && text === prevLastText) continue;
+
+    if (text === lastText) {
+      stableCount++;
+      const requiredStable = (text.length < MIN_LEN_FOR_QUICK_STABLE && !text.includes('"command"'))
+        ? 10 : STABLE_POLLS;
+      if (stableCount >= requiredStable) {
+        if (_isIntermediate(text)) { stableCount = 0; continue; }
+
+        // Reply is stable. Try to trigger a native browser download by clicking
+        // ChatGPT's download button (if present). Then wait up to 8s for download to complete.
+        if (!_capturedFileBuf) {
+          const clicked = await page.evaluate(() => {
+            const selectors = [
+              'button[aria-label*="Download"]', 'button[aria-label*="download"]',
+              'a[download]', '[data-testid*="download"]',
+              'button[aria-label*="下载"]',
+            ];
+            for (const sel of selectors) {
+              const btns = document.querySelectorAll(sel);
+              if (btns.length) { btns[btns.length - 1].click(); return true; }
+            }
+            return false;
+          }).catch(() => false);
+          if (clicked) console.log('[chatWithFile] clicked download button');
+          if (!_capturedFileBuf) await new Promise(r => setTimeout(r, 4000));
+          if (!_capturedFileBuf) await new Promise(r => setTimeout(r, 4000));
+        }
+
+        await cdpSession?.detach().catch(() => {});
+
+        // Fallback: DOM image capture
+        let fileBuf = _capturedFileBuf;
+        let fileExt = _capturedFileExt;
+        if (!fileBuf) {
+          fileBuf = await _captureLastReplyImage(page).catch(() => null);
+          if (fileBuf) fileExt = '.png';
+        }
+        if (fileBuf) {
+          console.log(`[chatWithFile] returning file: ${fileBuf.length}B ext=${fileExt}`);
+          return {
+            text,
+            raw: text,
+            downloadedContent: fileBuf,
+            downloadedExt: fileExt,
+            uploadConfirmed,
+            uploadState: finalUploadState,
+          };
+        }
+        return { text, raw: text, uploadConfirmed, uploadState: finalUploadState };
+      }
+    } else {
+      lastText = text;
+      stableCount = 0;
+    }
+  }
+
+  await cdpSession?.detach().catch(() => {});
+  if (lastText) {
+    if (!_capturedFileBuf) {
+      _capturedFileBuf = await _captureLastReplyImage(page).catch(() => null);
+      if (_capturedFileBuf) _capturedFileExt = '.png';
+    }
+    if (_capturedFileBuf) {
+      return {
+        text: lastText,
+        raw: lastText,
+        downloadedContent: _capturedFileBuf,
+        downloadedExt: _capturedFileExt,
+        generating: true,
+        uploadConfirmed,
+        uploadState: finalUploadState,
+      };
+    }
+    return { text: lastText, raw: lastText, generating: true, uploadConfirmed, uploadState: finalUploadState };
+  }
+  throw new Error('Reply timeout');
+}
+
+// ── Extract generated image from last assistant message ───────────────────────
+// ChatGPT shows AI-generated images as <img> elements inside the last assistant
+// message bubble. We fetch the highest-resolution src and return it as a Buffer.
+async function _captureLastReplyImage(page) {
+  const imgUrl = await page.evaluate(() => {
+    // Find the last assistant message
+    const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (!msgs.length) return null;
+    const last = msgs[msgs.length - 1];
+    // Look for <img> tags — skip tiny icons (< 100px) and avatars
+    const imgs = last.querySelectorAll('img');
+    let best = null;
+    let bestArea = 0;
+    for (const img of imgs) {
+      // Prefer naturalWidth/naturalHeight; fall back to layout size
+      const w = img.naturalWidth || img.width || img.clientWidth || 0;
+      const h = img.naturalHeight || img.height || img.clientHeight || 0;
+      const area = w * h;
+      if (area > bestArea && area > 10000) { // at least ~100x100
+        best = img.src || img.currentSrc || null;
+        bestArea = area;
+      }
+    }
+    return best;
+  }).catch(() => null);
+
+  if (!imgUrl || !imgUrl.startsWith('http')) return null;
+
+  console.log(`[chatWithFile] capturing generated image from DOM: ${imgUrl.slice(0, 80)}`);
+
+  // Fetch the image bytes via page.evaluate (inherits browser cookies/session)
+  const b64 = await page.evaluate(async (url) => {
+    try {
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) return null;
+      const ab = await resp.arrayBuffer();
+      const bytes = new Uint8Array(ab);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    } catch (_) {
+      return null;
+    }
+  }, imgUrl).catch(() => null);
+
+  if (!b64) return null;
+  const buf = Buffer.from(b64, 'base64');
+  console.log(`[chatWithFile] captured image: ${buf.length} bytes`);
+  return buf;
 }
 
 const args = process.argv.slice(2);

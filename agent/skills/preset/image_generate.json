@@ -1,0 +1,21 @@
+{
+  "name": "image_generate",
+  "category": "image_generate",
+  "identity": "painter",
+  "reviewer": "reviewer_image",
+  "flow": "direct_chat",
+  "description": "生成新图片（直接对话 → 捕获下载 → 保存）",
+  "patterns": [
+    "生成图", "画一张", "绘制", "画个", "create image", "generate image",
+    "draw", "render", "make image", "生成一张", "设计图"
+  ],
+  "rules": [
+    "不要输出 JSON 块。",
+    "直接在对话中生成并展示图片，确保图片可下载。",
+    "不要用文字描述图片内容来代替生成实际图片。"
+  ],
+  "steps": [],
+  "notes": "通过 DALL-E 生成图片，无需上传文件。",
+  "success_count": 0,
+  "last_used": ""
+}

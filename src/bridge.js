@@ -25,7 +25,7 @@ const chatOpts = (cdp) => ({
   cdpUrl: cdp.url ?? 'http://127.0.0.1:9222',
   chatgptUrl: cdp.chatgptUrl ?? 'https://chatgpt.com/',
   pollIntervalMs: cdp.replyPollIntervalMs ?? 500,
-  pollTimeoutMs: cdp.pollTimeoutMs ?? 120000,
+  pollTimeoutMs: cdp.replyPollTimeoutMs ?? cdp.pollTimeoutMs ?? 180000,
   pageReadyTimeoutMs: cdp.pageReadyTimeoutMs ?? 15000,
 });
 
@@ -38,10 +38,16 @@ export default {
       const result = await chatgptWeb.chat(userInput, {
         ...chatOpts(cdp),
         newChat: options.newChat ?? false,
+        agentId: options.agentId ?? 'default',
       });
 
       const text = result?.text || '';
-      return { ok: true, result: text };
+      const ret = { ok: true, result: text, generating: result?.generating ?? false };
+      if (result?.downloadedContent) {
+        ret.downloaded_b64 = result.downloadedContent.toString('base64');
+        ret.downloaded_ext = result.downloadedExt ?? '.bin';
+      }
+      return ret;
     } catch (e) {
       if (e.message?.startsWith('CF_BLOCKED')) {
         return {
@@ -52,5 +58,9 @@ export default {
       }
       throw e;
     }
+  },
+  async closeAgent(agentId = 'default') {
+    await chatgptWeb.closeAgent(agentId);
+    return { ok: true, agentId };
   },
 };

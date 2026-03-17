@@ -1,0 +1,32 @@
+{
+  "name": "write_ppt",
+  "category": "write_ppt",
+  "identity": "presenter",
+  "reviewer": "reviewer_doc",
+  "flow": "script_then_run",
+  "description": "创建 PowerPoint 演示文稿（写 python-pptx 脚本 → 执行 → 交付 .pptx）",
+  "patterns": [
+    "ppt", "幻灯片", "演示文稿", "powerpoint", "presentation",
+    "汇报", "开会", "slides"
+  ],
+  "rules": [
+    "必须输出 file_op write 块写 .py 脚本，AND 一个 python 执行块。",
+    "使用 python-pptx 库生成 .pptx 到桌面。",
+    "最终交付物是 .pptx 文件，不是 .py 文件。",
+    "写完脚本后立即执行，不要等待。",
+    "JSON 中 content 字段用 \\n 表示换行，不能有实际换行符。"
+  ],
+  "loop_policy": {
+    "artifact_extensions": [".pptx", ".ppt"],
+    "script_extensions": [".py"],
+    "require_script_execution": true,
+    "require_artifact": true
+  },
+  "steps": [
+    {"command": "file_op", "action": "write", "path": "<desktop>\\output_ppt.py", "content": "from pptx import Presentation\\n# ..."},
+    {"command": "python", "path": "<desktop>\\output_ppt.py"}
+  ],
+  "notes": "需要安装 python-pptx：pip install python-pptx",
+  "success_count": 0,
+  "last_used": ""
+}

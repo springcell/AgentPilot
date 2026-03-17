@@ -1,0 +1,23 @@
+{
+  "name": "run_test",
+  "category": "write_code",
+  "identity": "tester",
+  "reviewer": "reviewer_code",
+  "flow": "default",
+  "description": "运行测试、验证功能或回归测试",
+  "patterns": [
+    "测试", "验证", "回归", "run test", "unit test", "pytest", "跑用例",
+    "测试用例", "测试脚本", "verify", "test suite", "测试报告"
+  ],
+  "rules": [
+    "用 python 运行测试（pytest 或直接执行测试脚本）。",
+    "分析失败原因并修复，修复后重新运行验证。",
+    "最终输出所有测试通过的确认。"
+  ],
+  "steps": [
+    {"command": "powershell", "arguments": ["cd <project_path>", "python -m pytest -v"]}
+  ],
+  "notes": "若无 pytest，先 pip install pytest 再运行。",
+  "success_count": 0,
+  "last_used": ""
+}

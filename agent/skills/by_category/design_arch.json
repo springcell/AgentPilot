@@ -1,0 +1,21 @@
+{
+  "name": "design_arch",
+  "category": "write_code",
+  "identity": "architect",
+  "reviewer": "reviewer_code",
+  "flow": "default",
+  "description": "软件架构设计、技术方案或代码重构",
+  "patterns": [
+    "架构", "重构", "设计方案", "技术方案", "architecture", "refactor",
+    "design pattern", "模块设计", "系统设计", "tech design"
+  ],
+  "rules": [
+    "先用 file_op read 读取现有代码，理解结构。",
+    "输出设计方案时保存为 .md 文件；重构代码用 file_op write 覆写。",
+    "修改后用 python 验证无语法错误。"
+  ],
+  "steps": [],
+  "notes": "重构前先备份原文件（file_op write 到 _backup 路径）。",
+  "success_count": 0,
+  "last_used": ""
+}

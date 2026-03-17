@@ -1,0 +1,220 @@
+{
+  "category_identity": {
+    "write_code": "identity_programmer",
+    "write_ppt": "identity_presenter",
+    "write_doc": "identity_writer",
+    "image_modify": "identity_painter",
+    "image_generate": "identity_painter",
+    "control_system": "identity_system",
+    "analyze_data": "identity_analyst",
+    "translate": "identity_translator",
+    "run_test": "identity_tester",
+    "design_arch": "identity_architect",
+    "write_readme": "identity_tech_writer"
+  },
+  "category_reviewer": {
+    "write_code": "identity_reviewer_code",
+    "run_test": "identity_reviewer_code",
+    "design_arch": "identity_reviewer_code",
+    "image_modify": "identity_reviewer_image",
+    "image_generate": "identity_reviewer_image",
+    "write_doc": "identity_reviewer_doc",
+    "write_ppt": "identity_reviewer_doc",
+    "write_readme": "identity_reviewer_doc",
+    "analyze_data": "identity_reviewer_doc",
+    "translate": "identity_reviewer_doc"
+  },
+  "category_flow": {
+    "image_modify": "file_chat_first",
+    "image_generate": "direct_chat",
+    "write_ppt": "script_then_run",
+    "write_doc": "script_then_run",
+    "write_code": "default",
+    "control_system": "control_only",
+    "file_ops": "default",
+    "general": "default"
+  },
+  "identity_delivery_rules": {
+    "default": [
+      "严格产出可落盘、可复核的最终交付物，不要只给过程说明。",
+      "若任务要求保存文件，最终回复必须明确给出已保存路径。",
+      "连续失败时先给诊断与下一步，不要无限重试。"
+    ],
+    "by_category": {
+      "image_modify": [
+        "交付最终可下载图片，并确保文件已保存到目标路径。",
+        "如未形成成品图片，直接报告失败原因并停止当前回路。"
+      ],
+      "image_generate": [
+        "交付最终可下载图片，并确保文件已保存到目标路径。"
+      ],
+      "write_code": [
+        "优先交付可执行源码文件，并至少完成一次验证。"
+      ],
+      "write_doc": [
+        "优先交付 markdown、txt、docx 等文档文件，并返回保存路径。"
+      ],
+      "write_ppt": [
+        "主交付物是 ppt/pptx 文件；大纲仅可作为失败回退。"
+      ],
+      "analyze_data": [
+        "交付分析脚本、结果文件和简短结论，输入输出路径需明确。"
+      ],
+      "run_test": [
+        "交付测试命令、测试结果和关键失败摘要。"
+      ]
+    }
+  },
+  "loop_policies": {
+    "default": {
+      "done_conditions": [
+        "最终交付物已生成，并且可被本地保存或直接使用。"
+      ],
+      "stop_conditions": [
+        "达到停止条件后立即结束，不做无限重试。"
+      ],
+      "fallback": [
+        "无法完成时返回明确诊断、阻塞原因和下一步建议。"
+      ]
+    },
+    "by_category": {
+      "image_modify": {
+        "done_conditions": [
+          "捕获到修改后的图片，并已保存到目标路径。"
+        ],
+        "stop_conditions": [
+          "上传成功但连续只有说明回复且没有图片时，立即停止。"
+        ],
+        "fallback": [
+          "返回失败原因，并说明未拿到成品图片的原因。"
+        ]
+      },
+      "image_generate": {
+        "done_conditions": [
+          "捕获到生成图片，并已保存到目标路径。"
+        ],
+        "stop_conditions": [
+          "连续只有说明回复且没有图片时，立即停止。"
+        ],
+        "fallback": [
+          "返回失败原因，并说明未拿到成品图片的原因。"
+        ]
+      },
+      "write_code": {
+        "done_conditions": [
+          "代码文件已写入，且至少完成一次本地验证。"
+        ],
+        "stop_conditions": [
+          "连续验证失败超过阈值时停止并返回诊断。"
+        ],
+        "fallback": [
+          "返回当前错误、影响文件和建议修复方向。"
+        ]
+      },
+      "write_ppt": {
+        "done_conditions": [
+          "ppt/pptx 文件已生成并保存到目标路径。"
+        ],
+        "stop_conditions": [
+          "无法生成 pptx 时停止，不以脚本本身冒充最终交付。"
+        ],
+        "fallback": [
+          "回退为大纲或诊断，并明确说明未生成 pptx。"
+        ]
+      }
+    }
+  },
+  "identity_prompt_styles": {
+    "write_code": "executor_json",
+    "run_test": "executor_json",
+    "design_arch": "executor_json",
+    "control_system": "executor_json",
+    "analyze_data": "executor_json",
+    "write_ppt": "executor_json",
+    "write_doc": "direct_delivery",
+    "write_readme": "direct_delivery",
+    "translate": "direct_delivery",
+    "image_modify": "asset_only",
+    "image_generate": "asset_only",
+    "general": "plain"
+  },
+  "role_to_identity": {
+    "programmer": "programmer",
+    "writer": "writer",
+    "painter": "painter",
+    "presenter": "presenter",
+    "system": "system",
+    "analyst": "analyst",
+    "translator": "translator",
+    "tester": "tester",
+    "architect": "architect",
+    "tech_writer": "tech_writer",
+    "tech writer": "tech_writer",
+    "reviewer": "reviewer",
+    "程序员": "programmer",
+    "撰稿人": "writer",
+    "画家": "painter",
+    "设计师": "painter",
+    "演示稿专家": "presenter",
+    "系统控制": "system",
+    "数据分析师": "analyst",
+    "翻译": "translator",
+    "测试": "tester",
+    "架构师": "architect",
+    "技术文档": "tech_writer",
+    "审核专家": "reviewer"
+  },
+  "identity_to_category": {
+    "programmer": "write_code",
+    "writer": "write_doc",
+    "painter": "image_generate",
+    "presenter": "write_ppt",
+    "system": "control_system",
+    "analyst": "write_doc",
+    "translator": "general",
+    "tester": "write_code",
+    "architect": "write_code",
+    "tech_writer": "write_doc",
+    "reviewer": "general"
+  },
+  "identity_aliases": {
+    "programmer": "programmer",
+    "writer": "writer",
+    "painter": "painter",
+    "designer": "painter",
+    "presenter": "presenter",
+    "system": "system",
+    "analyst": "analyst",
+    "translator": "translator",
+    "tester": "tester",
+    "architect": "architect",
+    "tech_writer": "tech_writer",
+    "tech writer": "tech_writer",
+    "reviewer": "reviewer",
+    "程序员": "programmer",
+    "撰稿人": "writer",
+    "画家": "painter",
+    "设计师": "painter",
+    "演示稿专家": "presenter",
+    "系统控制": "system",
+    "数据分析师": "analyst",
+    "翻译": "translator",
+    "测试": "tester",
+    "架构师": "architect",
+    "技术文档": "tech_writer",
+    "审核专家": "reviewer"
+  },
+  "identity_to_agent_id": {
+    "programmer": "executor_programmer",
+    "writer": "executor_writer",
+    "painter": "executor_painter",
+    "presenter": "executor_presenter",
+    "system": "executor_system",
+    "analyst": "executor_analyst",
+    "translator": "executor_translator",
+    "tester": "executor_tester",
+    "architect": "executor_architect",
+    "tech_writer": "executor_tech_writer",
+    "reviewer": "reviewer"
+  }
+}

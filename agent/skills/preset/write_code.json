@@ -1,0 +1,22 @@
+{
+  "name": "write_code",
+  "category": "write_code",
+  "identity": "programmer",
+  "reviewer": "reviewer_code",
+  "flow": "default",
+  "description": "写或修复 Python 脚本",
+  "patterns": [
+    "python", ".py", "代码", "脚本", "写个", "修复语法",
+    "syntax error", "indentation", "爬虫", "script", "函数", "bug"
+  ],
+  "rules": [
+    "JSON content 字段中用 \\n 表示换行，不得有实际换行符。",
+    "所有 JSON 字符串使用双引号。",
+    "写完 .py 文件后，立即执行验证无语法错误。",
+    "执行失败时重写整个文件，不要只打补丁。"
+  ],
+  "steps": [],
+  "notes": "使用 auto_verify_py 循环自动检查语法。",
+  "success_count": 0,
+  "last_used": ""
+}

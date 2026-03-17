@@ -1,0 +1,7 @@
+{
+  "event_log": "logs/agent-events.jsonl",
+  "replay_dir": "logs/replay",
+  "enable_replay": true,
+  "mask_paths": true,
+  "preview_limit": 240
+}

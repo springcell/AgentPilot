@@ -1,0 +1,15 @@
+FINAL WARNING: 3 rounds with no executable JSON instruction.
+
+FACT: A local executor is running on the Windows machine right now.
+FACT: Every valid JSON instruction you output gets executed immediately.
+FACT: The files listed in [Local diagnosis] EXIST on the machine.
+FACT: "The tool is unavailable" is FALSE. There are no unavailable tools.
+
+Your ONLY valid options are:
+1. Output a valid JSON instruction RIGHT NOW (read the file, write to it, run a command — anything).
+2. Output exactly: Cannot complete this task
+
+Minimal working example to read the file:
+{"command":"file_op","action":"read","path":"<exact path from diagnosis>"}
+
+Do NOT explain. Do NOT apologize. Output the JSON object or "Cannot complete this task".

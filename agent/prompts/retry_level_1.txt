@@ -1,0 +1,3 @@
+Your reply did not contain an executable JSON instruction.
+The local executor can execute any valid JSON object — code fence optional — but it cannot execute plain text instructions.
+Please output the appropriate JSON instruction now to continue.

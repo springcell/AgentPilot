@@ -12,7 +12,7 @@
       "pageReadyTimeoutMs": 15000,
       "authTimeoutMs": 120000,
       "replyPollIntervalMs": 500,
-      "replyPollTimeoutMs": 120000
+      "replyPollTimeoutMs": 180000
     }
   }
 }

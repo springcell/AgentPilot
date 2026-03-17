@@ -14,7 +14,7 @@ from typing import Optional
 from json_parser import extract_json_blocks, parse
 from file_ops import run as file_op_run
 
-SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op"}
+SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op", "request_help"}
 
 
 def _get_output_encoding() -> str:
@@ -114,6 +114,11 @@ def execute_block(block: dict, timeout: int = 60) -> dict:
     """Execute a single JSON instruction block; return structured result."""
     cmd = block.get("command", "").lower().strip()
     result = {"command": cmd, "success": False, "stdout": "", "stderr": "", "returncode": -1}
+
+    if cmd == "request_help":
+        result["stderr"] = "request_help must be handled by agent_loop, not executor"
+        result["returncode"] = 1
+        return result
 
     if cmd == "file_op":
         action = block.get("action", "")

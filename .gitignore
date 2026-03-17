@@ -9,4 +9,9 @@ write_debug.log
 /Test
 __pycache__/
 *.pyc
-.claude/settings.local.json
+# Editor / IDE (local only, do not push)
+.claude/
+.cursor/
+.vscode/
+.vs/
+/docs

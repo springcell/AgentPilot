@@ -1,0 +1,11 @@
+STILL no executable JSON instruction. Every action MUST include a valid JSON object.
+Do NOT say "the tool is unavailable". Do NOT say "please upload". Do NOT describe steps in text.
+The local executor IS running. It WILL execute your JSON. The files listed above EXIST right now.
+
+Output a JSON instruction now. If you need to read a file first, use:
+{"command":"file_op","action":"read","path":"<path from diagnosis above>"}
+
+If you need to modify a file, use:
+{"command":"file_op","action":"write","path":"<path>","content":"<content>"}
+
+Output the JSON object directly. No explanation needed.

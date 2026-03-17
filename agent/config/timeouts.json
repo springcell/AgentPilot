@@ -1,0 +1,7 @@
+{
+  "reply_poll_interval_seconds": 3,
+  "reply_poll_timeout_seconds": 660,
+  "reply_stall_seconds": 20,
+  "review_timeout_seconds": 180,
+  "request_help_timeout_seconds": 300
+}

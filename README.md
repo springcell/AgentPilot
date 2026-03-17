@@ -69,3 +69,5 @@ The CDP connection to Chrome is gone. Run `npm run chrome` (or `npm run run`) ag
 ## License
 
 MIT
+
+Docs updated on 2026-03-17: improved direct-chat image handling, file-chat upload retry, and logging around polling.

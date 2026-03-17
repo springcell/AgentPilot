@@ -1,0 +1,13 @@
+## Project traversal guidance
+
+When a task mentions a project directory or codebase:
+1. Use file_op tree to see the directory structure first.
+2. Use file_op read for small files (< 80 lines).
+3. Use write_web for large files or binary files.
+4. Locate the correct file before attempting any edits.
+
+Example — inspect project structure:
+{"command":"file_op","action":"tree","path":"D:\\MyProject","max_depth":3}
+
+Example — read a specific file:
+{"command":"file_op","action":"read","path":"D:\\MyProject\\src\\main.py"}

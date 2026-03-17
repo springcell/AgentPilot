@@ -84,11 +84,14 @@ async function runCli(message, options = {}) {
       const text = typeof result.result === 'string' ? result.result : String(result.result ?? '');
       const out = text.trim() || '(No response)';
       process.stdout.write(out + '\n\n');
+      return { ok: true, text: out, raw: result };
     } else if (result.code === 'CF_BLOCKED') {
       process.stdout.write(`\nNetwork restricted\n${result.error}\n`);
+      return { ok: false, text: '', raw: result };
     } else {
       process.stdout.write(`Error: ${result.error}\n`);
       if (result.raw) process.stdout.write(`Raw: ${result.raw.slice(0, 200)}...\n`);
+      return { ok: false, text: '', raw: result };
     }
   } catch (e) {
     process.stderr.write(`Error: ${e.message}\n`);
@@ -99,10 +102,16 @@ async function runCli(message, options = {}) {
   }
 }
 
+function isTaskComplete(text) {
+  const value = String(text || '');
+  return value.includes('✅ Task complete') || value.includes('Task complete:') ||
+    value.includes('✅ 任务完成') || value.includes('任务完成：');
+}
+
 async function runInteractive() {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const prompt = () =>
-    rl.question('\nInput (empty to exit)> ', async (line) => {
+  const promptForInstructions = (label = '\nInput (empty to exit)> ') =>
+    rl.question(label, async (line) => {
       const input = line?.trim();
       if (!input) {
         rl.close();
@@ -110,12 +119,32 @@ async function runInteractive() {
       }
       const newChat = input.startsWith('/new ');
       const msg = newChat ? input.slice(5).trim() : input;
-      await runCli(msg, newChat ? { newChat: true } : {});
-      prompt();
+      const cliResult = await runCli(msg, newChat ? { newChat: true } : {});
+      if (!cliResult?.ok || !isTaskComplete(cliResult.text)) {
+        promptForInstructions();
+        return;
+      }
+      rl.question('Task complete? (yes/no) ', async (answer) => {
+        const choice = (answer || '').trim().toLowerCase();
+        if (choice === 'yes' || choice === 'y') {
+          try {
+            await bridge.closeAgent('default');
+          } catch (e) {
+            process.stderr.write(`Close chat failed: ${e.message}\n`);
+          }
+          rl.close();
+          return;
+        }
+        if (choice === 'no' || choice === 'n') {
+          promptForInstructions('Please provide new instructions\n> ');
+          return;
+        }
+        promptForInstructions('Please answer yes or no\n> ');
+      });
     });
   console.log('AgentPilot - Chat with ChatGPT');
   console.log('  Prefix /new to start new chat: /new your message');
-  prompt();
+  promptForInstructions();
 }
 
 async function main() {
