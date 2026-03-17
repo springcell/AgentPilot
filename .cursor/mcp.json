@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "agent-pilot": {
-      "command": "node",
-      "args": ["src/mcp-server.js"]
-    }
-  }
-}
