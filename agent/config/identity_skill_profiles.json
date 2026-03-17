@@ -49,6 +49,8 @@
         "交付最终可下载图片，并确保文件已保存到目标路径。"
       ],
       "write_code": [
+        "Every executable programming step must be wrapped in exactly one fenced ```json code block.",
+        "Bare JSON is not accepted for write_code tasks.",
         "优先交付可执行源码文件，并至少完成一次验证。"
       ],
       "write_doc": [

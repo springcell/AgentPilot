@@ -1,0 +1,23 @@
+{
+  "name": "fix_test_py",
+  "category": "write_code",
+  "flow": "default",
+  "description": "fix test.py",
+  "patterns": [
+    "test_py",
+    "test",
+    "fix"
+  ],
+  "rules": [],
+  "steps": [
+    {
+      "command": "file_op",
+      "action": "write",
+      "path": "D:/tmp/test.py",
+      "content": "print(1)"
+    }
+  ],
+  "notes": "",
+  "success_count": 2,
+  "last_used": "2026-03-17 23:34"
+}

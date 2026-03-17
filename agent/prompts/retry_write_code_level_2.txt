@@ -1,0 +1,8 @@
+STILL no executable instruction for the programming task.
+Rules:
+1. Every executable step MUST be inside a fenced ```json code block.
+2. Bare JSON is not accepted for write_code tasks.
+3. Do NOT describe steps in text.
+4. Use the real file paths already shown above.
+
+Re-output the next action now as exactly one fenced ```json block.

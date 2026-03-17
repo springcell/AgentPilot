@@ -388,25 +388,49 @@ def _local_diagnose(task_text: str, ai_text: str, env_info: dict, attempt: int) 
         )
         diag_lines.append("")
 
+    retry_prefix = "retry_level"
+    try:
+        if infer_category(task_text, env_info) == "write_code":
+            retry_prefix = "retry_write_code_level"
+    except Exception:
+        retry_prefix = "retry_level"
+    code_block_mode = retry_prefix == "retry_write_code_level"
+
     # 分级重试提示：从外部文件加载，硬编码内容作为兜底
     if attempt == 1:
-        instruction = _load_prompt_file("retry_level_1",
-            "Your reply did not contain an executable JSON instruction. "
-            "The local executor can execute any valid JSON object; a code fence is optional. It cannot execute plain text instructions. Please output the appropriate JSON instruction now to continue."
+        instruction = _load_prompt_file(f"{retry_prefix}_1",
+            (
+                "Your reply did not contain an executable JSON instruction. "
+                "For write_code tasks, every executable step MUST be wrapped in a fenced ```json code block. "
+                "Do not output bare JSON or plain text."
+                if code_block_mode else
+                "Your reply did not contain an executable JSON instruction. "
+                "The local executor can execute any valid JSON object; a code fence is optional. It cannot execute plain text instructions. Please output the appropriate JSON instruction now to continue."
+            )
         )
     elif attempt == 2:
-        instruction = _load_prompt_file("retry_level_2",
-            "STILL no executable JSON instruction. Every action MUST include a valid JSON object. "
-            "Do NOT say 'please upload', 'cannot access', 'try manually', or describe steps in text. "
-            "Output the JSON object directly. "
-            "Use the file paths listed above — they exist on this machine right now."
+        instruction = _load_prompt_file(f"{retry_prefix}_2",
+            (
+                "STILL no executable JSON instruction. For write_code tasks, every action MUST be a fenced ```json code block. "
+                "Do NOT output bare JSON. Do NOT describe steps in text. Use the file paths listed above — they exist on this machine right now."
+                if code_block_mode else
+                "STILL no executable JSON instruction. Every action MUST include a valid JSON object. "
+                "Do NOT say 'please upload', 'cannot access', 'try manually', or describe steps in text. "
+                "Output the JSON object directly. "
+                "Use the file paths listed above — they exist on this machine right now."
+            )
         )
     else:
-        instruction = _load_prompt_file("retry_level_3",
-            "FINAL WARNING: You have now failed to output an executable JSON instruction 3 times. "
-            "Rules: (1) Never say you cannot execute. (2) Never ask for file uploads. "
-            "(3) The ONLY valid response is a valid JSON object. "
-            "Output one JSON instruction right now or output: Cannot complete this task."
+        instruction = _load_prompt_file(f"{retry_prefix}_3",
+            (
+                "FINAL WARNING: You have now failed to output an executable JSON instruction 3 times. "
+                "For write_code tasks, the ONLY valid response is exactly one fenced ```json code block, or: Cannot complete this task."
+                if code_block_mode else
+                "FINAL WARNING: You have now failed to output an executable JSON instruction 3 times. "
+                "Rules: (1) Never say you cannot execute. (2) Never ask for file uploads. "
+                "(3) The ONLY valid response is a valid JSON object. "
+                "Output one JSON instruction right now or output: Cannot complete this task."
+            )
         )
 
     diag_lines.append(instruction)
@@ -509,6 +533,17 @@ def _build_tool_correction(last_results: list) -> str:
         "4. Use the exact local path from the task description.",
     ]
     return "\n".join(lines)
+
+
+def _build_write_code_code_block_correction() -> str:
+    return _load_prompt_file(
+        "retry_write_code_code_fence",
+        (
+            "For write_code tasks, every executable instruction MUST be wrapped in a fenced ```json code block.\n"
+            "Do not output bare JSON.\n"
+            "Re-output the same executable instruction now, using exactly one fenced ```json block and no extra explanation."
+        ),
+    )
 
 
 _PATH_RE = _re.compile(
@@ -1760,7 +1795,11 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
     runtime_identity_key = runtime_identity_name.replace("identity_", "") if runtime_identity_name.startswith("identity_") else runtime_identity_name
     effective_identity = _dispatch_identity or runtime_identity_key
     agent_id_main = get_agent_id_for_identity(effective_identity) if effective_identity else "default"
-    runtime = LoopRuntime(task_id, task_text, "default", messages_to_send, new_chat, agent_id_main)
+    agent_new_chat = new_chat
+    if agent_id_main != "default":
+        _close_agent_window(agent_id_main)
+        agent_new_chat = True
+    runtime = LoopRuntime(task_id, task_text, "default", messages_to_send, agent_new_chat, agent_id_main)
 
     if skill_hint:
         print(f"   [skills] Matched history skill injected into prompt")
@@ -1788,6 +1827,7 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
             task_done_marker=_task_done_marker,
             has_tool_unavailable_claim=_has_tool_unavailable_claim,
             build_tool_correction=_build_tool_correction,
+            build_code_block_correction=_build_write_code_code_block_correction,
         ),
         file_ops=FileOpsContext(
             poll_url=POLL_URL,
@@ -1804,73 +1844,77 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
     )
 
     print(f"   [flow] Using flow={_flow_name} agent_id={agent_id_main}")
-    if _flow_name == "file_chat_first":
-        flow_result = _run_file_chat_first_flow(flow_ctx, task_text, env_info, _loop_policy, agent_id=agent_id_main)
-        if flow_result is not None:
-            return flow_result
-    elif _flow_name == "direct_chat":
-        flow_result = _run_direct_chat_asset_flow(
-            flow_ctx,
-            _identity_line,
-            enriched_task,
-            task_text,
-            _loop_policy,
-            agent_id=agent_id_main,
-        )
-        if flow_result is not None:
-            return flow_result
-    elif _flow_name == "script_then_run":
-        return _run_script_then_run_loop(
-            ctx=flow_ctx,
-            task_id=task_id,
-            task_text=task_text,
-            verbose=verbose,
-            messages_to_send=messages_to_send,
-            new_chat=new_chat,
-            agent_id_main=agent_id_main,
-            loop_policy=_loop_policy,
-            task_category=_task_category,
-            reviewer_prompt=_reviewer_prompt,
-            unmatched_task=_unmatched_task,
-        )
-    elif _task_category == "write_code":
-        return _run_code_loop(
-            ctx=flow_ctx,
-            task_id=task_id,
-            task_text=task_text,
-            verbose=verbose,
-            messages_to_send=messages_to_send,
-            new_chat=new_chat,
-            agent_id_main=agent_id_main,
-            loop_policy=_loop_policy,
-            task_category=_task_category,
-            reviewer_prompt=_reviewer_prompt,
-            unmatched_task=_unmatched_task,
-        )
-    elif _prompt_style == "direct_delivery":
-        return _run_direct_delivery_loop(
-            ctx=flow_ctx,
-            task_id=task_id,
-            task_text=task_text,
-            verbose=verbose,
-            messages_to_send=messages_to_send,
-            new_chat=new_chat,
-            agent_id_main=agent_id_main,
-            loop_policy=_loop_policy,
-            reviewer_prompt=_reviewer_prompt,
-        )
+    try:
+        if _flow_name == "file_chat_first":
+            flow_result = _run_file_chat_first_flow(flow_ctx, task_text, env_info, _loop_policy, agent_id=agent_id_main)
+            if flow_result is not None:
+                return flow_result
+        elif _flow_name == "direct_chat":
+            flow_result = _run_direct_chat_asset_flow(
+                flow_ctx,
+                _identity_line,
+                enriched_task,
+                task_text,
+                _loop_policy,
+                agent_id=agent_id_main,
+            )
+            if flow_result is not None:
+                return flow_result
+        elif _flow_name == "script_then_run":
+            return _run_script_then_run_loop(
+                ctx=flow_ctx,
+                task_id=task_id,
+                task_text=task_text,
+                verbose=verbose,
+                messages_to_send=messages_to_send,
+                new_chat=agent_new_chat,
+                agent_id_main=agent_id_main,
+                loop_policy=_loop_policy,
+                task_category=_task_category,
+                reviewer_prompt=_reviewer_prompt,
+                unmatched_task=_unmatched_task,
+            )
+        elif _task_category == "write_code":
+            return _run_code_loop(
+                ctx=flow_ctx,
+                task_id=task_id,
+                task_text=task_text,
+                verbose=verbose,
+                messages_to_send=messages_to_send,
+                new_chat=agent_new_chat,
+                agent_id_main=agent_id_main,
+                loop_policy=_loop_policy,
+                task_category=_task_category,
+                reviewer_prompt=_reviewer_prompt,
+                unmatched_task=_unmatched_task,
+            )
+        elif _prompt_style == "direct_delivery":
+            return _run_direct_delivery_loop(
+                ctx=flow_ctx,
+                task_id=task_id,
+                task_text=task_text,
+                verbose=verbose,
+                messages_to_send=messages_to_send,
+                new_chat=agent_new_chat,
+                agent_id_main=agent_id_main,
+                loop_policy=_loop_policy,
+                reviewer_prompt=_reviewer_prompt,
+            )
 
-    return _run_default_loop(
-        ctx=flow_ctx,
-        task_id=task_id,
-        task_text=task_text,
-        verbose=verbose,
-        runtime=runtime,
-        loop_policy=_loop_policy,
-        task_category=_task_category,
-        reviewer_prompt=_reviewer_prompt,
-        unmatched_task=_unmatched_task,
-    )
+        return _run_default_loop(
+            ctx=flow_ctx,
+            task_id=task_id,
+            task_text=task_text,
+            verbose=verbose,
+            runtime=runtime,
+            loop_policy=_loop_policy,
+            task_category=_task_category,
+            reviewer_prompt=_reviewer_prompt,
+            unmatched_task=_unmatched_task,
+        )
+    finally:
+        if agent_id_main and agent_id_main != "default":
+            _close_agent_window(agent_id_main)
 
 
 def _read_multiline(prompt: str) -> str:

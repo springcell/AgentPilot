@@ -15,6 +15,7 @@ from json_parser import extract_json_blocks, parse
 from file_ops import run as file_op_run
 
 SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op", "request_help"}
+WRITE_ACTIONS = {"write", "write_chunk", "write_web", "patch", "insert", "append", "delete_lines", "insert_lines"}
 
 
 def _get_output_encoding() -> str:
@@ -142,6 +143,8 @@ def execute_block(block: dict, timeout: int = 60) -> dict:
         result["stdout"] = _fmt_file_op(action, r)
         result["stderr"] = r.get("error", "") if not r.get("ok") else ""
         result["returncode"] = 0 if r.get("ok") else 1
+        if action in WRITE_ACTIONS:
+            result["status"] = "write_ok" if result["success"] else "write_error"
         return result
 
     try:
@@ -188,6 +191,8 @@ def format_result_for_ai(results: list[dict]) -> str:
             lines.append(f"Output:\n{r['stdout']}")
         if r["stderr"]:
             lines.append(f"Error:\n{r['stderr']}")
+        if r.get("status"):
+            lines.append(f"Status: {r['status']}")
         lines.append(f"Return code: {r['returncode']}")
     return "\n".join(lines)
 

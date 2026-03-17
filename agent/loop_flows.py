@@ -5,12 +5,13 @@ import re as _re
 from dataclasses import dataclass
 from typing import Callable
 
-from executor import extract_json_blocks, auto_verify_py, _extract_py_targets
+from executor import extract_json_blocks
 from env_context import collect as collect_env
 from file_ops import _read_text
 from loop_common import (
     LoopRuntime,
     append_successful_blocks as _append_successful_blocks,
+    build_nonterminal_validation_followup as _build_nonterminal_validation_followup,
     build_verify_rewrite_hint as _build_verify_rewrite_hint,
     build_loop_fallback as _build_loop_fallback,
     collect_verify_output as _collect_verify_output,
@@ -44,6 +45,7 @@ class DiagnosticsContext:
     task_done_marker: Callable[[str], bool]
     has_tool_unavailable_claim: Callable[[str], bool]
     build_tool_correction: Callable[[list], str]
+    build_code_block_correction: Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,11 @@ def _is_intermediate(text: str) -> bool:
         return False
     cleaned = _INTERMEDIATE_PREFIX_RE.sub("", cleaned).strip()
     return any(_re.search(pattern, cleaned, _re.IGNORECASE) for pattern in _INTERMEDIATE_REPLY_PATTERNS)
+
+
+def _has_fenced_json_block(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return '"command"' in lowered and ("```json" in lowered or "```" in lowered)
 
 
 def _is_desktop_image_cleanup_task(task_text: str) -> bool:
@@ -583,7 +590,6 @@ def _run_script_then_run_loop(
             return ai_text
         if status == "retry":
             continue
-
         if not blocks:
             if ctx.diagnostics.task_done_marker(ai_text):
                 state = _evaluate_script_then_run_state([], [], runtime.executed_blocks, task_text, loop_policy)
@@ -794,7 +800,7 @@ def _run_code_loop(
             verbose=verbose,
             label="write_code",
             flow="write_code",
-            allow_cannot_complete=True,
+            allow_cannot_complete=False,
             cannot_complete_formatter=lambda text: _format_flow_terminal_feedback(text, loop_policy),
         )
         if status == "error":
@@ -803,17 +809,15 @@ def _run_code_loop(
             return ai_text
         if status == "retry":
             continue
+        if blocks and not _has_fenced_json_block(ai_text):
+            runtime.messages_to_send.append(ctx.diagnostics.build_code_block_correction())
+            continue
 
         if not blocks:
             if ctx.diagnostics.task_done_marker(ai_text):
-                py_targets = _extract_py_targets(runtime.executed_blocks)
-                final_verify = "".join(auto_verify_py(pt) for pt in py_targets)
-                wrote = _session_has_write(runtime.executed_blocks)
-                if not wrote or "❌" in final_verify or not py_targets:
-                    runtime.messages_to_send.append(
-                        "[REJECTED] write_code flow requires real file changes plus successful verification. "
-                        "Read/write the file and run verification before declaring completion.\n" + final_verify
-                    )
+                ok, completion_feedback = _validate_completion_for_code(runtime, [], require_verify=True)
+                if not ok:
+                    runtime.messages_to_send.append(completion_feedback)
                     continue
                 approved, review_reply = _run_reviewer_if_needed(ctx, task_id, reviewer_prompt, task_text, ai_text)
                 if approved:
@@ -822,6 +826,15 @@ def _run_code_loop(
                         save_skill_from_success(task_text, runtime.executed_blocks, notes=skill_notes, category=task_category)
                     return ai_text
                 runtime.messages_to_send.append(f"[审核反馈]\n{review_reply}")
+                continue
+            if runtime.executed_blocks and (
+                runtime.verify_fail_count > 0
+                or runtime.had_intercepted_write
+                or ctx.diagnostics.cannot_complete_marker(ai_text)
+                or ctx.diagnostics.has_tool_unavailable_claim(ai_text)
+            ):
+                followup = _build_nonterminal_validation_followup()
+                runtime.messages_to_send.append(f"{ai_text}\n\n{followup}".strip())
                 continue
             return ai_text
 
@@ -849,7 +862,10 @@ def _run_code_loop(
             runtime.verify_fail_count += 1
             runtime.messages_to_send[-1] = full_feedback + "\n\n[SELF-HEAL] 验证失败，请重读当前文件后整体修复，并再次运行验证。"
             if runtime.verify_fail_count > ctx.chat.max_invalid_reply_retries:
-                return _format_flow_terminal_feedback(ai_text, loop_policy)
+                runtime.messages_to_send[-1] += (
+                    "\n\n[Validation] Automatic verification is still failing. "
+                    "Keep the loop alive: rewrite the full file or provide a concrete alternative verification step."
+                )
             continue
         runtime.verify_fail_count = 0
 
@@ -1140,6 +1156,15 @@ def _run_default_loop(
             if ctx.diagnostics.task_done_marker(ai_text):
                 print(f"\nAgent declared task complete (no more blocks)")
                 return ai_text
+            if runtime.executed_blocks and (
+                runtime.verify_fail_count > 0
+                or runtime.had_intercepted_write
+                or ctx.diagnostics.cannot_complete_marker(ai_text)
+                or ctx.diagnostics.has_tool_unavailable_claim(ai_text)
+            ):
+                followup = _build_nonterminal_validation_followup()
+                runtime.messages_to_send.append(f"{ai_text}\n\n{followup}".strip())
+                continue
             if verbose and ai_text:
                 preview = ai_text[:200] + ("..." if len(ai_text) > 200 else "")
                 print(f"\nNo exec instruction (received {len(ai_text)} chars)")
@@ -1208,8 +1233,11 @@ def _run_default_loop(
             rewrite_hint = _build_verify_rewrite_hint(current_blocks, _read_text, runtime.verify_fail_count)
             runtime.messages_to_send[-1] = full_feedback + rewrite_hint
             if runtime.verify_fail_count > ctx.chat.max_invalid_reply_retries:
-                print(f"\nExceeded verify-fail retries, stopping")
-                return ai_text
+                print(f"\nVerify retries exceeded; continuing loop with stronger guidance")
+                runtime.messages_to_send[-1] += (
+                    "\n\n[Validation] Automatic verification is still failing. "
+                    "Keep the loop alive: rewrite the full file or provide a concrete alternative verification step."
+                )
             continue
         runtime.verify_fail_count = 0
 

@@ -1,0 +1,4 @@
+Your reply did not contain an executable instruction for a programming task.
+For write_code tasks, every executable step MUST be wrapped in a fenced ```json code block.
+Do not output bare JSON. Do not output prose.
+Output exactly one fenced ```json block now.

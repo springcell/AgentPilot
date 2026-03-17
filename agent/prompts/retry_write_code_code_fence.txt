@@ -1,0 +1,3 @@
+Your last programming reply contained executable JSON, but it was not wrapped in a fenced code block.
+For write_code tasks, bare JSON is not accepted.
+Re-output the same instruction now as exactly one fenced ```json code block and nothing else.

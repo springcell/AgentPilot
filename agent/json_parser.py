@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_COMMANDS = {"powershell", "cmd", "python", "python3", "file_op", "request_help"}
 _WINDOWS_PATH_JSON_FIELDS = ("path", "dst", "src", "file_path", "target_file")
+_PAYLOAD_STRING_FIELDS = {"content", "message", "prompt", "text"}
 
 
 # ──────────────────────────────────────────────────────────
@@ -63,6 +64,42 @@ def _fix_json(raw: str) -> str:
 
     s = path_pattern.sub(_escape_path_value, s)
 
+    # 转义字符串内部的裸换行/制表符，避免 content/message 这类长文本导致整段 JSON 失效。
+    repaired = []
+    in_str = False
+    escape = False
+    quote = ""
+    for ch in s:
+        if escape:
+            repaired.append(ch)
+            escape = False
+            continue
+        if in_str:
+            if ch == "\\":
+                repaired.append(ch)
+                escape = True
+                continue
+            if ch == quote:
+                repaired.append(ch)
+                in_str = False
+                continue
+            if ch == "\n":
+                repaired.append("\\n")
+                continue
+            if ch == "\r":
+                repaired.append("\\r")
+                continue
+            if ch == "\t":
+                repaired.append("\\t")
+                continue
+            repaired.append(ch)
+            continue
+        if ch in "\"'":
+            in_str = True
+            quote = ch
+        repaired.append(ch)
+    s = "".join(repaired)
+
     # 删除单行 // 注释（不在字符串内的）
     s = re.sub(r'(?<!["\w])//[^\n]*', '', s)
     # 删除多行 /* */ 注释
@@ -92,6 +129,44 @@ def _fix_json(raw: str) -> str:
     return s
 
 
+def _light_unescape_text(raw: str) -> str:
+    """Decode lightly escaped JSON-ish text when the whole reply is double-escaped."""
+    s = _clean(raw)
+    if not s:
+        return s
+    looks_escaped = '\\"command\\"' in s or "\\n{" in s or (s.startswith('"') and s.endswith('"'))
+    if not looks_escaped:
+        return s
+    if s.startswith('"') and s.endswith('"'):
+        try:
+            decoded = json.loads(s)
+            if isinstance(decoded, str):
+                s = decoded
+        except json.JSONDecodeError:
+            pass
+    return s.replace("\\r\\n", "\n").replace("\\n", "\n").replace('\\"', '"')
+
+
+def _normalize_payload_value(value):
+    if not isinstance(value, str):
+        return value
+    if "\\n" not in value and '\\"' not in value and "\\t" not in value:
+        return value
+    try:
+        decoded = bytes(value, "utf-8").decode("unicode_escape")
+    except UnicodeDecodeError:
+        return value
+    return decoded or value
+
+
+def _normalize_parsed_block(obj: dict) -> dict:
+    normalized = dict(obj)
+    for key in _PAYLOAD_STRING_FIELDS:
+        if key in normalized:
+            normalized[key] = _normalize_payload_value(normalized[key])
+    return normalized
+
+
 def _try_parse(raw: str) -> dict | None:
     """尝试解析一段字符串为含 command 字段的 dict，失败返回 None"""
     if not raw:
@@ -107,7 +182,7 @@ def _try_parse(raw: str) -> dict | None:
                 if cmd not in SUPPORTED_COMMANDS:
                     logger.debug("跳过不支持的 command: %s", cmd)
                     return None
-                return obj
+                return _normalize_parsed_block(obj)
         except (json.JSONDecodeError, AttributeError):
             continue
     return None
@@ -236,6 +311,23 @@ def _s7_inline_command_object(text: str) -> list:
     return results
 
 
+def _s8_all_brace_windows(text: str, max_candidates: int = 48, max_block_len: int = 200000) -> list:
+    """Scan every opening brace and try the matched window as a standalone JSON object."""
+    results = []
+    seen: set[str] = set()
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        block = _extract_brace_block(text, idx)
+        if not block or len(block) > max_block_len or block in seen:
+            continue
+        seen.add(block)
+        results.append(block)
+        if len(results) >= max_candidates:
+            break
+    return results
+
+
 # ──────────────────────────────────────────────────────────
 # 主解析入口
 # ──────────────────────────────────────────────────────────
@@ -245,6 +337,7 @@ _STRATEGIES = [
     ("无标记代码块 ```...```", _s2_fenced_any),
     ("裸标记行 JSON\\n{...}", _s3_bare_label),
     ("自然语言中的内联 JSON 对象", _s7_inline_command_object),
+    ("全量花括号窗口扫描", _s8_all_brace_windows),
     ("首个大括号", _s4_first_brace),
     ("宽松花括号扫描", _s5_loose_brace),
     ("全文多块提取", _s6_multi_block),
@@ -269,33 +362,43 @@ def parse(text: str, debug: bool = False) -> ParseResult:
     """
     result = ParseResult()
     seen_ids: set = set()
+    variants: list[tuple[str, str]] = [("raw", text)]
+    cleaned = _clean(text)
+    if cleaned and cleaned != text:
+        variants.append(("clean", cleaned))
+    unescaped = _light_unescape_text(cleaned)
+    if unescaped and all(unescaped != existing for _, existing in variants):
+        variants.append(("unescaped", unescaped))
 
-    for idx, (strategy_name, extractor) in enumerate(_STRATEGIES):
-        candidates = extractor(text)
-        if not candidates:
-            continue
-
-        if debug:
-            result.raw_candidates.extend(candidates)
-
-        parsed_this_round = []
-        for raw in candidates:
-            obj = _try_parse(raw)
-            if obj is None:
+    for variant_name, variant_text in variants:
+        for idx, (strategy_name, extractor) in enumerate(_STRATEGIES):
+            candidates = extractor(variant_text)
+            if not candidates:
                 continue
-            uid = json.dumps(obj, sort_keys=True, ensure_ascii=False)
-            if uid in seen_ids:
-                continue
-            seen_ids.add(uid)
-            parsed_this_round.append(obj)
 
-        if parsed_this_round:
-            result.blocks.extend(parsed_this_round)
-            if not result.strategy:
-                result.strategy = strategy_name
-            logger.debug("[%s] 提取到 %d 个块", strategy_name, len(parsed_this_round))
-            if idx < 3:
-                break
+            if debug:
+                result.raw_candidates.extend(candidates)
+
+            parsed_this_round = []
+            for raw in candidates:
+                obj = _try_parse(raw)
+                if obj is None:
+                    continue
+                uid = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+                if uid in seen_ids:
+                    continue
+                seen_ids.add(uid)
+                parsed_this_round.append(obj)
+
+            if parsed_this_round:
+                result.blocks.extend(parsed_this_round)
+                if not result.strategy:
+                    result.strategy = strategy_name if variant_name == "raw" else f"{strategy_name} ({variant_name})"
+                logger.debug("[%s/%s] 提取到 %d 个块", strategy_name, variant_name, len(parsed_this_round))
+                if idx < 3:
+                    break
+        if result.blocks:
+            break
 
     if not result.blocks:
         result.warnings.append("No strategy found a valid JSON instruction block")

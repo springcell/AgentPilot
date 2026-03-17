@@ -30,16 +30,22 @@ def append_successful_blocks(runtime: LoopRuntime, blocks: list[dict], results: 
 
 def collect_verify_output(blocks: list[dict], results: list[dict], verbose: bool = False) -> str:
     verify_extra = ""
-    if any(not r["success"] for r in results) or any(
-        b.get("action") in ("write", "patch") and b.get("path", "").endswith(".py")
+    py_targets = _extract_py_targets(blocks)
+    wrote_files = any(
+        b.get("command") == "file_op" and b.get("action") in WRITE_ACTIONS
         for b in blocks
-    ):
-        for pt in _extract_py_targets(blocks):
+    )
+    if any(not r["success"] for r in results) or py_targets:
+        for pt in py_targets:
             v = auto_verify_py(pt)
             if v:
                 verify_extra += v
                 if verbose:
                     print(v)
+    elif wrote_files and all(r["success"] for r in results):
+        verify_extra = "\n[Validation] Skipped: no supported automatic verifier for the written targets."
+        if verbose:
+            print(verify_extra)
     return verify_extra
 
 
@@ -89,7 +95,7 @@ def validate_completion_for_code(runtime: LoopRuntime, current_blocks: list[dict
             "Output the write_web (for large files) or write block now."
         )
     py_targets = _extract_py_targets(current_blocks) or _extract_py_targets(runtime.executed_blocks)
-    if require_verify:
+    if require_verify and py_targets:
         final_verify = "".join(auto_verify_py(pt) for pt in py_targets)
         if "❌" in final_verify:
             return False, (
@@ -97,9 +103,16 @@ def validate_completion_for_code(runtime: LoopRuntime, current_blocks: list[dict
                 + "\nThe file still has errors after your fix. "
                 "Read the file content first, then rewrite it completely with file_op write."
             )
-        if not py_targets:
-            return False, "[REJECTED] write_code flow requires successful verification before completion."
     return True, ""
+
+
+def build_nonterminal_validation_followup() -> str:
+    return (
+        "[REJECTED] Validation feedback or unavailable tooling is not a terminal state.\n"
+        "Do not stop the task yet.\n"
+        "Either output the next executable JSON fix, or give a concrete alternative verification step after the write.\n"
+        "Do not reply with only 'cannot complete' or 'tool unavailable'."
+    )
 
 
 def execute_with_feedback_override(

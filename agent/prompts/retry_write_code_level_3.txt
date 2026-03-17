@@ -1,0 +1,7 @@
+FINAL WARNING: you have failed 3 times to output an executable programming instruction.
+
+The ONLY valid responses are:
+1. Exactly one fenced ```json code block containing the next executable instruction, or
+2. Exactly: Cannot complete this task
+
+Do not output bare JSON. Do not explain.
