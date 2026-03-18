@@ -990,6 +990,33 @@ def _is_terminal_file_chat_text_only(result: dict) -> bool:
     return len(text) < 80 and not _is_intermediate(text)
 
 
+def _build_office_binary_write_correction(path: str, ext: str) -> str:
+    ext = str(ext or "").lower()
+    base = (
+        f"--- BLOCKED file_op:write path={path} ---\n"
+        "Do not use file_op write to create Office binary files from plain text.\n"
+    )
+    if ext in (".xlsx", ".xls"):
+        return (
+            base
+            + "Use python + openpyxl to create a real Excel file, or save tabular text as .csv instead.\n"
+            + "Example direction: output a python block/script that writes the workbook, or change the target path to .csv and use file_op write."
+        )
+    if ext in (".docx", ".doc"):
+        return (
+            base
+            + "Use python + python-docx to create a real Word file, or save plain text as .txt/.md instead.\n"
+            + "Example direction: output a python block/script that writes the document, or change the target path to .txt/.md and use file_op write."
+        )
+    if ext in (".pptx", ".ppt"):
+        return (
+            base
+            + "Use python + python-pptx to create a real PowerPoint file.\n"
+            + "Example direction: output a python block/script that creates the slides, then run it."
+        )
+    return base + "Use the correct generator for this binary format instead of file_op write."
+
+
 def _intercept_large_file_writes(blocks: list, task_text: str = "", agent_id: str = "default",
                                   ai_text: str = "") -> tuple[list, str, bool]:
     """
@@ -1015,6 +1042,7 @@ def _intercept_large_file_writes(blocks: list, task_text: str = "", agent_id: st
         ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
         ".zip", ".rar", ".7z", ".gz", ".exe", ".dll", ".pdf",
     }
+    _OFFICE_BINARY_EXTS = {".pptx", ".ppt", ".xlsx", ".xls", ".docx", ".doc"}
 
     # ChatGPT sandbox path prefixes — these paths exist only inside ChatGPT's VM, not on Windows
     _SANDBOX_PREFIXES = ("/mnt/data/", "/tmp/", "/var/", "/home/", "/root/", "/sandbox/")
@@ -1092,6 +1120,10 @@ def _intercept_large_file_writes(blocks: list, task_text: str = "", agent_id: st
 
         # 对图片/二进制扩展名，即使文件不存在也要拦截
         ext = os.path.splitext(path)[1].lower()
+        if ext in _OFFICE_BINARY_EXTS:
+            print(f"   [intercept] BLOCKED office-binary write: {path} (ext={ext})")
+            feedback_parts.append(_build_office_binary_write_correction(path, ext))
+            continue
         if ext in _BINARY_EXTS:
             file_exists = os.path.isfile(path)
             print(f"   [intercept] BLOCKED binary-ext write: {path} (ext={ext}, exists={file_exists})")
@@ -1531,6 +1563,9 @@ def _poll_until_final(agent_id: str, start_text: str, message: str) -> str:
         stalled    = bool(poll.get("stalled"))
         dl_b64     = poll.get("downloaded_b64", "")
         dl_ext     = poll.get("downloaded_ext", ".bin")
+        if not current and generating:
+            print("   [poll] generating=true len=0: waiting for first reply...")
+            continue
         print(f"   [poll] generating={generating} len={len(current)}: "
               f"{current[:60].replace(chr(10), ' ')}")
         if dl_b64 and not generating:
@@ -1871,7 +1906,7 @@ def run_agent(
             finally:
                 _close_agent_window("dispatcher")
 
-        _matched_skill, _ = match_skill_by_category(task_text, env_info)
+        _matched_skill, _ = match_skill_by_category(task_text, env_info, _task_category)
         _runtime_profile = get_skill_runtime_profile(_task_category, _matched_skill)
         selected_identity_key = normalize_identity_key(_dispatch_identity) or _dispatch_identity
         if selected_identity_key:

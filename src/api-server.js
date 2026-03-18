@@ -190,6 +190,7 @@ async function _executorAvailable() {
 
 // agent_loop.py poll cache: key = agentId (default "default"), value = { text, generating, updatedAt }
 const _replyCache = {};
+const AGENT_WINDOW_PREFIX = 'agentpilot:';
 
 // Match intermediate state (search/think/browse); supports "ChatGPT says: ..." style prefix
 const _INTERMEDIATE_RE = [
@@ -726,6 +727,15 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify(result));
     } catch (e) {
+      if (String(e.message || '').includes('Reply timeout')) {
+        _replyCache[agentId] = { text: '', generating: true, updatedAt: Date.now() };
+        _pollDomUntilFinal(agentId).catch(err =>
+          console.error('  [poll] DOM poll error after timeout:', err.message)
+        );
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, result: '', generating: true }));
+        return;
+      }
       _replyCache[agentId] = { text: '', generating: false, updatedAt: Date.now() };
       res.writeHead(500);
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -939,12 +949,26 @@ async function _pollDomUntilFinal(agentId, maxMs = 600_000) {
       const pages = await browser.pages();
       const chatPages = pages.filter(p => p.url().includes('chatgpt.com'));
       if (!chatPages.length) continue;
-      let page = chatPages.find(p => true);
-      for (const p of chatPages) {
-        try {
-          const hasStop = await p.evaluate(() => !!document.querySelector('[data-testid="stop-button"]'));
-          if (hasStop) { page = p; break; }
-        } catch (_) {}
+      let page = null;
+      if (agentId !== 'default') {
+        for (const p of chatPages) {
+          try {
+            const isMatch = await p.evaluate((tag) => window.name === tag, `${AGENT_WINDOW_PREFIX}${agentId}`);
+            if (isMatch) {
+              page = p;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+      if (!page) {
+        page = chatPages.find(p => true);
+        for (const p of chatPages) {
+          try {
+            const hasStop = await p.evaluate(() => !!document.querySelector('[data-testid="stop-button"]'));
+            if (hasStop) { page = p; break; }
+          } catch (_) {}
+        }
       }
       try { await page.bringToFront(); } catch (_) {}
 

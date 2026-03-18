@@ -144,6 +144,210 @@ def _has_fenced_json_block(text: str) -> bool:
     return '"command"' in lowered and ("```json" in lowered or "```" in lowered)
 
 
+_SAVE_PATH_SUFFIX_RE = r"\.(?:txt|md|csv|json|html|log|docx|xlsx|pptx)\b"
+_WIN_SAVE_PATH_RE = _re.compile(
+    rf"(?:[A-Za-z]:[\\/]|\\\\)[^\n\r\"'`<>|*?]+?{_SAVE_PATH_SUFFIX_RE}",
+    _re.IGNORECASE,
+)
+_DESKTOP_ENV_SAVE_PATH_RE = _re.compile(
+    rf"%DESKTOP%[\\/][^\n\r\"'`<>|*?]+?{_SAVE_PATH_SUFFIX_RE}",
+    _re.IGNORECASE,
+)
+_DESKTOP_REL_SAVE_PATH_RE = _re.compile(
+    rf"(?:Desktop|桌面)[\\/][^\n\r\"'`<>|*?]+?{_SAVE_PATH_SUFFIX_RE}",
+    _re.IGNORECASE,
+)
+
+_SAVE_VERB_RE = _re.compile(
+    r'(save(?:\s+it)?(?:\s+to|\s+as)?|write(?:\s+it)?(?:\s+to)?|export(?:\s+to)?|put(?:\s+it)?\s+on|'
+    r'\u4fdd\u5b58|\u5199\u5165|\u5199\u5230|\u653e\u5230|\u653e\u5728|\u843d\u76d8|\u5bfc\u51fa|\u5b58\u5230)',
+    _re.IGNORECASE,
+)
+
+_SAVE_DEST_RE = _re.compile(
+    r'(desktop|documents|downloads|'
+    r'\u684c\u9762|\u6587\u6863|\u4e0b\u8f7d|\u8bb0\u4e8b\u672c|notepad|'
+    r'\.(?:txt|md|csv|json|html|log|docx|xlsx|pptx)\b|'
+    r'\b(?:txt|markdown|md|csv|html|log|docx|xlsx|pptx)\b|'
+    r'json\s+file|json\u6587\u4ef6)',
+    _re.IGNORECASE,
+)
+
+_OFFICE_EXT_FALLBACK_MAP = {
+    ".xlsx": ".csv",
+    ".xls": ".csv",
+    ".docx": ".txt",
+    ".doc": ".txt",
+}
+
+
+def _task_suggests_save_to_disk(task_text: str) -> bool:
+    if not (task_text or "").strip():
+        return False
+    text = str(task_text or "")
+    if _WIN_SAVE_PATH_RE.search(text):
+        return True
+    return bool(_SAVE_VERB_RE.search(text) and _SAVE_DEST_RE.search(text))
+
+
+def _guess_direct_delivery_write_path(task_text: str, ai_text: str, desktop_hint: str) -> str:
+    claimed = _extract_claimed_save_paths(ai_text, desktop_hint)
+    if claimed:
+        path = claimed[0]
+        root, ext = os.path.splitext(path)
+        fallback_ext = _OFFICE_EXT_FALLBACK_MAP.get(ext.lower())
+        return root + fallback_ext if fallback_ext else path
+    desktop = str(desktop_hint or "").strip() or r"C:\Users\admin\Desktop"
+    lowered = str(task_text or "").lower()
+    filename = "result.txt"
+    if any(token in lowered for token in ("stock", "stocks", "csv", "table", "list", "news")) or any(
+        token in str(task_text or "") for token in ("股票", "表格", "列表", "新闻", "清单", "推荐")
+    ):
+        filename = "result.csv"
+    return os.path.join(desktop, filename)
+
+
+def _build_direct_delivery_write_example(task_text: str, ai_text: str, desktop_hint: str) -> str:
+    sample_path = _guess_direct_delivery_write_path(task_text, ai_text, desktop_hint).replace("\\", "\\\\")
+    return (
+        "Output exactly one executable JSON object now. No explanation.\n"
+        "Example:\n"
+        f'{{"command":"file_op","action":"write","path":"{sample_path}","content":"<full final content>"}}'
+    )
+
+
+def _reply_marks_task_complete(ai_text: str) -> bool:
+    if not (ai_text or "").strip():
+        return False
+    lowered = str(ai_text or "").lower()
+    return "task complete" in lowered or "\u4efb\u52a1\u5b8c\u6210" in str(ai_text or "")
+
+
+def _reply_claims_local_file_saved(ai_text: str) -> bool:
+    if not (ai_text or "").strip():
+        return False
+    a = ai_text.lower()
+    if "[file saved to:" in a:
+        return True
+    if (
+        "saved to" in a
+        or "saved as" in a
+        or "written to" in a
+        or "stored at" in a
+        or "\u4fdd\u5b58\u5230" in ai_text
+        or "\u5df2\u4fdd\u5b58" in ai_text
+        or "\u5199\u5165\u5230" in ai_text
+        or "\u5199\u5230" in ai_text
+    ):
+        return True
+    if _WIN_SAVE_PATH_RE.search(ai_text or ""):
+        return True
+    if _DESKTOP_ENV_SAVE_PATH_RE.search(ai_text or ""):
+        return True
+    if _DESKTOP_REL_SAVE_PATH_RE.search(ai_text or ""):
+        return True
+    return False
+
+
+def _resolve_claimed_save_path(raw_path: str, desktop_hint: str) -> str:
+    path = str(raw_path or "").strip().strip("\"'`")
+    path = path.rstrip(".,;:!?)，。；：！）】」")
+    normalized = path.replace("/", "\\")
+    desktop = str(desktop_hint or "").strip()
+    upper = normalized.upper()
+    if upper.startswith("%DESKTOP%\\"):
+        rest = normalized[len("%DESKTOP%\\") :]
+        return os.path.normpath(os.path.join(desktop or ".", rest))
+    if normalized.lower().startswith("desktop\\") or normalized.startswith("桌面\\"):
+        rest = normalized.split("\\", 1)[1] if "\\" in normalized else ""
+        return os.path.normpath(os.path.join(desktop or ".", rest))
+    return os.path.normpath(normalized)
+
+
+def _extract_claimed_save_paths(ai_text: str, desktop_hint: str) -> list[str]:
+    raw_matches = []
+    text = str(ai_text or "")
+    for pattern in (_WIN_SAVE_PATH_RE, _DESKTOP_ENV_SAVE_PATH_RE, _DESKTOP_REL_SAVE_PATH_RE):
+        raw_matches.extend(match.group(0) for match in pattern.finditer(text))
+    resolved = []
+    seen = set()
+    for raw in raw_matches:
+        path = _resolve_claimed_save_path(raw, desktop_hint)
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(path)
+    return resolved
+
+
+def _claimed_save_paths_missing(ai_text: str, desktop_hint: str) -> list[str]:
+    paths = _extract_claimed_save_paths(ai_text, desktop_hint)
+    return [p for p in paths if not os.path.isfile(p)]
+
+
+def _direct_delivery_require_real_write(
+    *,
+    task_text: str,
+    ai_text: str,
+    wrote_this_session: bool,
+    desktop_hint: str,
+    last_write_path: str = "",
+) -> str | None:
+    """If model claims a file was saved but disk write did not happen, return corrective feedback."""
+    task_requires_write = _task_suggests_save_to_disk(task_text)
+    task_done = _reply_marks_task_complete(ai_text)
+    claims_saved = _reply_claims_local_file_saved(ai_text)
+    claimed_paths = _extract_claimed_save_paths(ai_text, desktop_hint)
+    path_in_reply = bool(claimed_paths)
+
+    if wrote_this_session:
+        missing = [p for p in claimed_paths if not os.path.isfile(p)]
+        if missing and (claims_saved or task_done):
+            return (
+                "[LOCAL EXECUTOR] You mentioned these paths but they do not exist on disk: "
+                + ", ".join(missing[:5])
+                + "\nYou must use file_op write (or write_web) so the executor actually creates the file. "
+                "Do not claim Task complete until the file exists.\n"
+                + _build_direct_delivery_write_example(task_text, ai_text, desktop_hint)
+            )
+        if task_requires_write and not path_in_reply:
+            saved_path = str(last_write_path or "").strip()
+            if saved_path:
+                return (
+                    "[LOCAL EXECUTOR] This task writes a local file, so your final reply must include the exact saved path.\n"
+                    f"Reply again with Task complete and include this path: {saved_path}"
+                )
+            return (
+                "[LOCAL EXECUTOR] This task writes a local file, so your final reply must include the exact saved path.\n"
+                "Reply again with Task complete and include the real saved path."
+            )
+        return None
+
+    if not (task_requires_write or path_in_reply):
+        return None
+
+    desk = (desktop_hint or "").strip() or "Desktop path from environment block above"
+    if not (claims_saved or task_done):
+        return (
+            "[LOCAL EXECUTOR] This task requires a real file to be written to disk before it can finish.\n"
+            "No successful file_op write / write_web has happened in this session yet.\n"
+            "Output one executable JSON block that writes the final file (for example under "
+            + desk
+            + ").\n"
+            + _build_direct_delivery_write_example(task_text, ai_text, desktop_hint)
+        )
+    return (
+        "[LOCAL EXECUTOR] No file was written in this session (no successful file_op write / write_web). "
+        "Saying the file is saved is not enough - the local executor never created a file.\n"
+        "You MUST output one executable JSON block: file_op write with path (e.g. under "
+        + desk
+        + ") and full text in \"content\".\n"
+        "Do not reply with Task complete until after a write succeeds.\n"
+        + _build_direct_delivery_write_example(task_text, ai_text, desktop_hint)
+    )
+
+
 def _build_round_signature(ai_text: str, blocks: list[dict]) -> str:
     if blocks:
         slim_blocks = []
@@ -311,6 +515,27 @@ def _completed_plain_write_response(blocks: list[dict], results: list[dict], ver
     return ""
 
 
+def _completed_direct_delivery_write_response(blocks: list[dict], results: list[dict]) -> str:
+    write_actions = {"write", "write_chunk", "patch", "insert", "append", "delete_lines"}
+    for block, result in zip(blocks, results):
+        if block.get("command") != "file_op" or block.get("action") not in write_actions:
+            continue
+        if not result.get("success"):
+            continue
+        target_path = str(block.get("path") or block.get("dst") or "").strip()
+        stdout = str(result.get("stdout", "")).strip()
+        parts = ["[Execution result feedback]"]
+        if stdout:
+            parts.append(stdout)
+        if target_path:
+            parts.append(f"[File saved to: {target_path}]")
+            parts.append(f"✅ Task complete: File saved to {target_path}")
+        else:
+            parts.append("✅ Task complete: File saved successfully")
+        return "\n".join(part for part in parts if part).strip()
+    return ""
+
+
 def _format_loop_policy_hint(loop_policy: dict, key: str, fallback: str = "") -> str:
     if not isinstance(loop_policy, dict):
         return fallback
@@ -449,6 +674,9 @@ def _build_direct_delivery_intro(loop_policy: dict) -> str:
     return (
         "[direct_delivery loop]\n"
         "本任务优先直接交付最终内容或保存后的最终文件。\n"
+        "如果任务要求保存到桌面或本地文件，必须先输出可执行 JSON（例如 file_op write 或 python），"
+        "真实写入成功后才能说 Task complete。\n"
+        "不要说工具不可用，不要只用自然语言声称“已保存”。\n"
         f"完成条件：{done_hint}\n"
         f"失败回退：{fallback_hint}"
     )
@@ -903,6 +1131,19 @@ def _run_direct_delivery_loop(
         if not blocks:
             if not ai_text.strip():
                 continue
+            desk = str(collect_env().get("desktop") or "")
+            gate = _direct_delivery_require_real_write(
+                task_text=task_text,
+                ai_text=ai_text,
+                wrote_this_session=_session_has_write(runtime.executed_blocks),
+                desktop_hint=desk,
+                last_write_path=_pick_recent_write_path(runtime.executed_blocks),
+            )
+            if gate:
+                runtime.messages_to_send.append(gate)
+                if verbose:
+                    print(f"   [direct_delivery] blocked prose-only completion: require real file_op write")
+                continue
             if _apply_reviewer_feedback(
                 ctx=ctx,
                 task_id=task_id,
@@ -941,6 +1182,9 @@ def _run_direct_delivery_loop(
             ):
                 return write_web_done
             continue
+        direct_write_done = _completed_direct_delivery_write_response(current_blocks, results)
+        if direct_write_done:
+            return _handle_write_web_completion(ctx, task_id, runtime.iteration, direct_write_done)
         runtime.messages_to_send.append(feedback)
 
     return _build_loop_fallback(runtime, loop_policy, _format_loop_policy_hint, ctx.chat.max_iterations)

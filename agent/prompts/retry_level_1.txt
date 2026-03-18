@@ -1,4 +1,6 @@
-Your reply did not contain an executable JSON instruction.
-The local executor can execute any valid JSON object — code fence optional — but it cannot execute plain text instructions.
+﻿Your reply did not contain an executable JSON instruction.
+The local executor can execute any valid JSON object; a code fence is optional.
+If you cannot produce a fenced code block, output the raw JSON object only.
+Do not mix the next step with extra explanation text.
 Do not ask the user which method to try next. Choose the next executable step yourself and output it.
 Please output the appropriate JSON instruction now to continue.

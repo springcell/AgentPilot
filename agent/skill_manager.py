@@ -532,8 +532,11 @@ def _rule_image_modify(task_lower: str, env_info: dict) -> bool:
 
 def _rule_image_generate(task_lower: str, env_info: dict) -> bool:
     return bool(re.search(
-        r'生成图|画一张|画个|绘制|create.*image|generate.*image|draw.*image|render.*image|画.*图',
+        r'生成图|画一张|画个|绘制|设计.*图|设计.*图标|图标|logo|icon|徽标|小图标'
+        r'|create.*image|generate.*image|draw.*image|render.*image|design.*icon|design.*logo'
+        r'|make.*icon|make.*logo|town.*icon|village.*icon|theme.*icon|画.*图',
         task_lower,
+        re.IGNORECASE,
     ))
 
 
@@ -612,14 +615,14 @@ def infer_flow(category: str, executed_blocks: list = None) -> str:
     return flow
 
 
-def match_skill_by_category(task_text: str, env_info: dict = None) -> tuple:
+def match_skill_by_category(task_text: str, env_info: dict = None, category_override: str | None = None) -> tuple:
     """
     Returns (skill_dict | None, category_string).
     Search order: preset → learned → flat (legacy).
     Within each directory, filter by category then rank by pattern matches.
     """
     _ensure_dir()
-    category  = infer_category(task_text, env_info)
+    category  = str(category_override or infer_category(task_text, env_info)).strip() or "general"
     task_lower = task_text.lower()
 
     def _best_in_dir(directory: str) -> dict | None:

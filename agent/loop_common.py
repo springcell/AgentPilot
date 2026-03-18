@@ -165,6 +165,9 @@ def build_false_done_pushback() -> str:
 
 
 def handle_no_block_task_complete(runtime: LoopRuntime, ai_text: str, task_done_marker_fn) -> tuple[bool, str]:
+    if "[File saved to:" in str(ai_text or ""):
+        runtime.had_intercepted_write = True
+        return True, ai_text
     if not task_done_marker_fn(ai_text):
         return True, ai_text
     if not session_has_write(runtime.executed_blocks) and not runtime.had_intercepted_write:

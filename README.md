@@ -84,4 +84,4 @@ The CDP connection to Chrome is gone. Run `npm run chrome` (or `npm run run`) ag
 
 MIT
 
-Latest: README usage examples, write_code code-block retries, and validation-loop improvements (validation failures no longer end the loop).
+Latest: direct_delivery now requires real file_op write when task asks for a file on disk (no prose-only completion); README usage examples and write_code/validation-loop improvements.

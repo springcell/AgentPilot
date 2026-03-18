@@ -232,6 +232,7 @@ function loadAuth() {
 }
 
 const agentPages = {};
+const AGENT_WINDOW_PREFIX = 'agentpilot:';
 
 async function isPageAlive(page) {
   try {
@@ -242,14 +243,53 @@ async function isPageAlive(page) {
   }
 }
 
-export async function closeAgent(agentId) {
-  const page = agentPages[agentId];
-  if (page) {
-    try {
-      await page.close();
-    } catch (_) {}
-    delete agentPages[agentId];
+async function tagAgentPage(page, agentId) {
+  if (!page || !agentId || agentId === 'default') return;
+  page.__agentPilotAgentId = agentId;
+  try {
+    await page.evaluate((tag) => {
+      window.name = tag;
+    }, `${AGENT_WINDOW_PREFIX}${agentId}`);
+  } catch (_) {}
+}
+
+async function pageMatchesAgent(page, agentId) {
+  if (!page || !agentId) return false;
+  if (page === agentPages[agentId]) return true;
+  if (page.__agentPilotAgentId === agentId) return true;
+  try {
+    return await page.evaluate((tag) => window.name === tag, `${AGENT_WINDOW_PREFIX}${agentId}`);
+  } catch (_) {
+    return false;
   }
+}
+
+async function closePageHard(page) {
+  if (!page) return;
+  try {
+    await page.close({ runBeforeUnload: false });
+  } catch (_) {}
+}
+
+export async function closeAgent(agentId, cdpUrl = 'http://127.0.0.1:9222') {
+  const browser = await getBrowser(cdpUrl);
+  const targets = new Set();
+  const tracked = agentPages[agentId];
+  if (tracked) targets.add(tracked);
+  for (const page of await browser.pages()) {
+    if (await pageMatchesAgent(page, agentId)) {
+      targets.add(page);
+    }
+  }
+  if (agentId === 'default' && targets.size === 0) {
+    const fallback = (await browser.pages()).find((page) => page.url().includes('chatgpt.com'));
+    if (fallback) targets.add(fallback);
+  }
+  for (const page of targets) {
+    await closePageHard(page);
+  }
+  delete agentPages[agentId];
+  delete _agentQueues[agentId];
 }
 
 export async function closeAllAgents() {
@@ -317,7 +357,9 @@ async function doChat(message, options = {}) {
       }
       await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
       agentPages[agentId] = page;
+      await tagAgentPage(page, agentId);
     } else {
+      await tagAgentPage(page, agentId);
       await page.bringToFront();
     }
   } else {
@@ -817,7 +859,9 @@ async function doChatWithFile(filePath, message, options = {}) {
       }
       await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
       agentPages[agentId] = page;
+      await tagAgentPage(page, agentId);
     } else {
+      await tagAgentPage(page, agentId);
       await page.bringToFront();
     }
   } else {
