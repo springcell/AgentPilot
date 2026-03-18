@@ -17,6 +17,13 @@ class LoopRuntime:
     verify_fail_count: int = 0
     error_history: list[str] = field(default_factory=list)
     last_failed_blocks: list[dict] = field(default_factory=list)
+    no_progress_count: int = 0
+    last_no_progress_signature: str = ""
+    chat_error_count: int = 0
+    last_chat_error: str = ""
+    round_repeat_count: int = 0
+    last_round_signature: str = ""
+    strategy_reset_count: int = 0
 
 
 WRITE_ACTIONS = {"write", "write_chunk", "write_web", "patch", "insert", "delete_lines", "append"}
@@ -163,3 +170,49 @@ def handle_no_block_task_complete(runtime: LoopRuntime, ai_text: str, task_done_
     if not session_has_write(runtime.executed_blocks) and not runtime.had_intercepted_write:
         return False, build_false_done_pushback()
     return True, ai_text
+
+
+def register_no_progress(runtime: LoopRuntime, signature: str) -> int:
+    signature = str(signature or "").strip()
+    if not signature:
+        signature = "<empty>"
+    if signature == runtime.last_no_progress_signature:
+        runtime.no_progress_count += 1
+    else:
+        runtime.last_no_progress_signature = signature
+        runtime.no_progress_count = 1
+    return runtime.no_progress_count
+
+
+def reset_no_progress(runtime: LoopRuntime) -> None:
+    runtime.no_progress_count = 0
+    runtime.last_no_progress_signature = ""
+
+
+def register_round_signature(runtime: LoopRuntime, signature: str) -> int:
+    signature = str(signature or "").strip()
+    if not signature:
+        signature = "<empty-round>"
+    if signature == runtime.last_round_signature:
+        runtime.round_repeat_count += 1
+    else:
+        runtime.last_round_signature = signature
+        runtime.round_repeat_count = 1
+    return runtime.round_repeat_count
+
+
+def reset_round_signature(runtime: LoopRuntime) -> None:
+    runtime.round_repeat_count = 0
+    runtime.last_round_signature = ""
+
+
+def pick_recent_write_path(blocks: list[dict]) -> str:
+    for block in reversed(blocks or []):
+        if block.get("command") != "file_op":
+            continue
+        if block.get("action") not in WRITE_ACTIONS:
+            continue
+        path = str(block.get("path") or block.get("dst") or "").strip()
+        if path:
+            return path
+    return ""

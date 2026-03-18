@@ -1,4 +1,4 @@
 Your reply did not contain an executable instruction for a programming task.
 For write_code tasks, every executable step MUST be wrapped in a fenced ```json code block.
-Do not output bare JSON. Do not output prose.
+Do not output bare JSON. Do not output prose. Do not ask the user which method to try.
 Output exactly one fenced ```json block now.

@@ -52,6 +52,8 @@ CHAT_URL = os.environ.get("AGENTPILOT_URL", "http://127.0.0.1:3000/chat")
 MAX_ITERATIONS = 100
 EXEC_TIMEOUT = 60
 
+_LAST_RUN_CONTEXT = None
+
 # Prompts directory — all .txt prompt files live here
 _PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
@@ -272,6 +274,24 @@ def _is_conversational(text: str, task_text: str) -> bool:
             return True
     return False
 
+
+def _looks_like_user_choice_question(text: str) -> bool:
+    t = str(text or "").strip()
+    if not t:
+        return False
+    patterns = [
+        r"would you like me to",
+        r"how would you like to proceed",
+        r"let me know how you'd prefer to proceed",
+        r"should i check",
+        r"should i try",
+        r"do you want me to",
+        r"\u662f\u5426\u9700\u8981\u6211",
+        r"\u4f60\u5e0c\u671b\u6211",
+        r"\u8bf7\u544a\u8bc9\u6211\u4f60\u60f3",
+    ]
+    return any(_re.search(pat, t, _re.IGNORECASE) for pat in patterns)
+
 def _is_valid_reply(text: str, task_text: str) -> bool:
     """
     Legitimate reply = has JSON block OR task-done marker OR pure conversational
@@ -385,6 +405,16 @@ def _local_diagnose(task_text: str, ai_text: str, env_info: dict, attempt: int) 
             "FACT: file_op read/write/patch execute immediately when you output them.\n"
             "FACT: powershell and python instructions also execute immediately.\n"
             "Do NOT say 'unavailable', 'cannot access', 'please upload' — just output a valid JSON instruction."
+        )
+        diag_lines.append("")
+
+    if _looks_like_user_choice_question(ai_text):
+        diag_lines.append(
+            "[CORRECTION] Your previous reply asked the user to choose the next method. THIS IS NOT ALLOWED.\n"
+            "Do not ask whether to check file existence, try another action, or choose a strategy.\n"
+            "You must choose and execute the next step yourself.\n"
+            "If file existence is relevant, output file_op exists immediately.\n"
+            "If file content is relevant, output file_op read immediately."
         )
         diag_lines.append("")
 
@@ -541,7 +571,10 @@ def _build_write_code_code_block_correction() -> str:
         (
             "For write_code tasks, every executable instruction MUST be wrapped in a fenced ```json code block.\n"
             "Do not output bare JSON.\n"
-            "Re-output the same executable instruction now, using exactly one fenced ```json block and no extra explanation."
+            "Do not ask the user what to try next.\n"
+            "The previous instruction was already executed.\n"
+            "Do NOT repeat any instruction that has already executed.\n"
+            "From the next step onward, output exactly one fenced ```json block and continue from the current state."
         ),
     )
 
@@ -1495,6 +1528,7 @@ def _poll_until_final(agent_id: str, start_text: str, message: str) -> str:
             continue
         current    = poll.get("text", "")
         generating = poll.get("generating", True)
+        stalled    = bool(poll.get("stalled"))
         dl_b64     = poll.get("downloaded_b64", "")
         dl_ext     = poll.get("downloaded_ext", ".bin")
         print(f"   [poll] generating={generating} len={len(current)}: "
@@ -1512,11 +1546,18 @@ def _poll_until_final(agent_id: str, start_text: str, message: str) -> str:
         if current != last_text:
             last_text     = current
             last_change_t = time.time()
+        if stalled and _is_intermediate(current):
+            raise RuntimeError("Reply polling stalled with intermediate content")
         if not generating and (time.time() - last_change_t) > STALL_SEC:
+            if _is_intermediate(current):
+                raise RuntimeError("Reply polling stalled with intermediate content")
             print(f"   [poll] Stall {STALL_SEC}s no update, forcing continue")
             return current
     poll = _http_get(f"{POLL_URL}?agentId={agent_id}")
-    return poll.get("text", last_text)
+    final_text = poll.get("text", last_text)
+    if _is_intermediate(final_text) and not _task_done_marker(final_text) and not _cannot_complete_marker(final_text):
+        raise RuntimeError("Reply polling timed out before reaching a final answer")
+    return final_text
 
 
 def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "default") -> str:
@@ -1585,7 +1626,7 @@ def chat_via_bridge(message: str, new_chat: bool = False, agent_id: str = "defau
 
 
 def _close_agent_window(agent_id: str) -> None:
-    if not agent_id or agent_id == "default":
+    if not agent_id:
         return
     body = json.dumps({"agentId": agent_id}).encode("utf-8")
     req = urllib.request.Request(
@@ -1699,14 +1740,49 @@ def _detect_modify_intent(task_text: str, env_info: dict) -> tuple[str, str]:
     return "", ""
 
 
-def run_agent(user_task: str, verbose: bool = True) -> str:
+def _close_task_window(agent_id: str) -> None:
     global _session_has_chat
+    target = str(agent_id or "default").strip() or "default"
+    _close_agent_window(target)
+    if target == "default":
+        _session_has_chat = False
+
+
+def _build_followup_message(task_text: str) -> str:
+    return (
+        "Continue the same task in the current conversation.\n"
+        "The previous result was not accepted as final.\n"
+        "Reuse the existing context in this chat. Do not restart from scratch.\n"
+        "Do not ask whether to continue.\n\n"
+        f"New user feedback / instructions:\n{task_text.strip()}"
+    )
+
+
+def _prompt_task_satisfaction() -> bool:
+    while True:
+        answer = input("Task complete. Are you satisfied? (yes/no)> ").strip().lower()
+        if answer in ("yes", "y"):
+            return True
+        if answer in ("no", "n"):
+            return False
+        print("Please answer yes or no.")
+
+
+def run_agent(
+    user_task: str,
+    verbose: bool = True,
+    *,
+    close_on_complete: bool = True,
+    continuation: dict | None = None,
+) -> str:
+    global _session_has_chat, _LAST_RUN_CONTEXT
 
     task_id = "task_" + uuid.uuid4().hex[:12]
     task_text = user_task.strip()
     force_new = task_text.lower().startswith("/new")
     if force_new:
         task_text = task_text[4:].strip()
+        continuation = None
 
     if force_new and not task_text:
         _session_has_chat = False
@@ -1716,7 +1792,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
     if not task_text:
         task_text = user_task
 
-    new_chat = force_new or not _session_has_chat
+    continuation = dict(continuation or {})
+    continuing_same_task = bool(continuation)
+    new_chat = False if continuing_same_task else (force_new or not _session_has_chat)
     if new_chat:
         _session_has_chat = True
 
@@ -1731,78 +1809,132 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
     skill_hint = skills_to_prompt(task_text)
     project_traverse_hint = _load_prompt_file("project_traverse_hint") if "## Project structure:" in enriched_task else ""
 
-    # ── Identity dispatch: round-0 AI judgment ───────────────────────────────
-    # Send a lightweight dispatch message to let AI decide language + identity.
-    # Falls back to code-side infer_category if the dispatch call fails or times out.
-    _dispatch_language = ""
-    _dispatch_identity = ""
-    _task_category     = infer_category(task_text, env_info)   # code-side fallback
+    if continuing_same_task:
+        _dispatch_language = str(continuation.get("dispatch_language", "")).strip()
+        _dispatch_identity = str(continuation.get("dispatch_identity", "")).strip()
+        _task_category = str(continuation.get("task_category") or infer_category(task_text, env_info)).strip() or "general"
+        _matched_skill = continuation.get("matched_skill")
+        _runtime_profile = dict(continuation.get("runtime_profile") or get_skill_runtime_profile(_task_category, _matched_skill))
+        _loop_policy = _runtime_profile.get("loop_policy", {}) if isinstance(_runtime_profile, dict) else {}
+        _flow_name = str(_runtime_profile.get("flow", "default")).strip() or "default"
+        _prompt_style = str(_runtime_profile.get("prompt_style", "plain")).strip() or "plain"
+        _unmatched_task = bool(continuation.get("unmatched_task", False))
+        _identity_line = ""
+        _reviewer_prompt = str(continuation.get("reviewer_prompt") or get_reviewer_prompt(_task_category, _matched_skill))
+        messages_to_send = [_build_followup_message(task_text)]
+        agent_id_main = str(continuation.get("agent_id") or "default").strip() or "default"
+        agent_new_chat = False
+        print(f"   [continue] Reusing agent_id={agent_id_main} category={_task_category}")
+        _log_event("INFO", "task_continue", task_id, agent_id=agent_id_main, category=_task_category)
+    else:
+        _dispatch_language = ""
+        _dispatch_identity = ""
+        _inferred_category = infer_category(task_text, env_info)
+        _task_category = _inferred_category
+        dispatch_prompt_tpl = _load_prompt_file("identity_dispatch")
+        if dispatch_prompt_tpl:
+            dispatch_msg = dispatch_prompt_tpl + task_text
+            try:
+                _write_replay(task_id, "dispatch", "request", dispatch_msg)
+                dispatch_reply = chat_via_bridge(dispatch_msg, new_chat=True, agent_id="dispatcher")
+                _write_replay(task_id, "dispatch", "response", dispatch_reply)
+                _lang, _identity_key, _cat = parse_dispatch_reply(dispatch_reply)
+                if _identity_key:
+                    dispatch_identity_category = get_category_for_identity(_identity_key, task_text) or _cat or "general"
+                    if _inferred_category != "general" and dispatch_identity_category == "general":
+                        _dispatch_language = _lang
+                        _task_category = _inferred_category
+                        print(
+                            f"   [dispatch] lang={_lang!r}  identity={_identity_key!r}  category={dispatch_identity_category}"
+                            f" -> overridden by inferred category={_inferred_category}"
+                        )
+                        _log_event(
+                            "WARN",
+                            "dispatch_identity_overridden",
+                            task_id,
+                            inferred_category=_inferred_category,
+                            dispatch_identity=_identity_key,
+                            dispatch_category=dispatch_identity_category,
+                        )
+                    else:
+                        _dispatch_language = _lang
+                        _dispatch_identity = _identity_key
+                        _task_category = dispatch_identity_category
+                        print(f"   [dispatch] lang={_lang!r}  identity={_identity_key!r}  category={_task_category}")
+                        _log_event("INFO", "skill_matched", task_id, category=_task_category, dispatch_language=_lang, identity=_identity_key)
+                else:
+                    print(f"   [dispatch] Could not parse reply: {dispatch_reply[:80]!r} -> using code fallback")
+                    _log_event("WARN", "dispatch_parse_failed", task_id, reply_preview=dispatch_reply)
+            except Exception as _e:
+                print(f"   [dispatch] Call failed ({_e}) -> using code fallback")
+                _log_event("WARN", "dispatch_failed", task_id, error=str(_e))
+            finally:
+                _close_agent_window("dispatcher")
 
-    dispatch_prompt_tpl = _load_prompt_file("identity_dispatch")
-    if dispatch_prompt_tpl:
-        dispatch_msg = dispatch_prompt_tpl + task_text
-        try:
-            _write_replay(task_id, "dispatch", "request", dispatch_msg)
-            dispatch_reply = chat_via_bridge(dispatch_msg, new_chat=True, agent_id="dispatcher")
-            _write_replay(task_id, "dispatch", "response", dispatch_reply)
-            _lang, _identity_key, _cat = parse_dispatch_reply(dispatch_reply)
-            if _identity_key:                        # AI gave a valid role
-                _dispatch_language = _lang
-                _dispatch_identity = _identity_key
-                _task_category = _cat
-                print(f"   [dispatch] lang={_lang!r}  identity={_identity_key!r}  category={_task_category}")
-                _log_event("INFO", "skill_matched", task_id, category=_task_category, dispatch_language=_lang, identity=_identity_key)
-            else:
-                print(f"   [dispatch] Could not parse reply: {dispatch_reply[:80]!r} — using code fallback")
-                _log_event("WARN", "dispatch_parse_failed", task_id, reply_preview=dispatch_reply)
-        except Exception as _e:
-            print(f"   [dispatch] Call failed ({_e}) — using code fallback")
-            _log_event("WARN", "dispatch_failed", task_id, error=str(_e))
+        _matched_skill, _ = match_skill_by_category(task_text, env_info)
+        _runtime_profile = get_skill_runtime_profile(_task_category, _matched_skill)
+        selected_identity_key = normalize_identity_key(_dispatch_identity) or _dispatch_identity
+        if selected_identity_key:
+            forced_identity_name = f"identity_{selected_identity_key}"
+            if _runtime_profile.get("identity") != forced_identity_name:
+                _runtime_profile = dict(_runtime_profile)
+                _runtime_profile["identity"] = forced_identity_name
+                print(f"   [identity] locked to dispatch identity={selected_identity_key}")
+        _loop_policy = _runtime_profile.get("loop_policy", {}) if isinstance(_runtime_profile, dict) else {}
+        _flow_name = str(_runtime_profile.get("flow", "default")).strip() or "default"
+        _prompt_style = str(_runtime_profile.get("prompt_style", "plain")).strip() or "plain"
+        _unmatched_task = not bool(_matched_skill) and not bool(skill_hint)
+        _identity_line = get_identity_prompt(
+            _task_category,
+            task_text[:80],
+            language=_dispatch_language,
+            skill=_matched_skill,
+            runtime_override=_runtime_profile,
+        )
+        _reviewer_prompt = get_reviewer_prompt(_task_category, _matched_skill)
 
-        finally:
-            _close_agent_window("dispatcher")
+        if _identity_line:
+            print(f"   [identity] category={_task_category}  identity injected")
+            _log_event("INFO", "identity_injected", task_id, category=_task_category)
+        if _reviewer_prompt:
+            print(f"   [reviewer] reviewer prompt loaded for category={_task_category}")
+            _log_event("INFO", "reviewer_loaded", task_id, category=_task_category)
 
-    _matched_skill, _ = match_skill_by_category(task_text, env_info)
-    _runtime_profile = get_skill_runtime_profile(_task_category, _matched_skill)
-    _loop_policy = _runtime_profile.get("loop_policy", {}) if isinstance(_runtime_profile, dict) else {}
-    _flow_name = str(_runtime_profile.get("flow", "default")).strip() or "default"
-    _prompt_style = str(_runtime_profile.get("prompt_style", "plain")).strip() or "plain"
-    _unmatched_task = not bool(_matched_skill) and not bool(skill_hint)
-    _identity_line   = get_identity_prompt(_task_category, task_text[:80], language=_dispatch_language, skill=_matched_skill)
-    _reviewer_prompt = get_reviewer_prompt(_task_category, _matched_skill)
+        first_message = (
+            (f"{_identity_line}\n\n" if _identity_line else "")
+            + f"{prompt}\n\n"
+            f"{env_block}\n\n"
+            f"{file_ops_hint}\n\n"
+            + (f"{project_traverse_hint}\n\n" if project_traverse_hint else "")
+            + (f"{skill_hint}\n\n" if skill_hint else "")
+            + (f"建议执行流：{_runtime_profile.get('flow', _task_category)}\n\n" if (_runtime_profile.get("flow") or _unmatched_task) else "")
+            + "---\n\n"
+            + f"User task (execute now, no questions): {enriched_task}"
+        )
+        messages_to_send = [first_message]
+        runtime_identity_name = str(_runtime_profile.get("identity", "")).strip()
+        runtime_identity_key = runtime_identity_name.replace("identity_", "") if runtime_identity_name.startswith("identity_") else runtime_identity_name
+        effective_identity = _dispatch_identity or runtime_identity_key
+        agent_id_main = get_agent_id_for_identity(effective_identity) if effective_identity else "default"
+        agent_new_chat = new_chat
+        if agent_id_main != "default":
+            agent_new_chat = True
 
-    if _identity_line:
-        print(f"   [identity] category={_task_category}  identity injected")
-        _log_event("INFO", "identity_injected", task_id, category=_task_category)
-    if _reviewer_prompt:
-        print(f"   [reviewer] reviewer prompt loaded for category={_task_category}")
-        _log_event("INFO", "reviewer_loaded", task_id, category=_task_category)
-    # ── end identity dispatch ─────────────────────────────────────────────────
+    _LAST_RUN_CONTEXT = {
+        "agent_id": agent_id_main,
+        "task_category": _task_category,
+        "dispatch_language": _dispatch_language,
+        "dispatch_identity": _dispatch_identity,
+        "runtime_profile": dict(_runtime_profile) if isinstance(_runtime_profile, dict) else _runtime_profile,
+        "reviewer_prompt": _reviewer_prompt,
+        "matched_skill": _matched_skill,
+        "unmatched_task": _unmatched_task,
+    }
 
-    first_message = (
-        (f"{_identity_line}\n\n" if _identity_line else "")
-        + f"{prompt}\n\n"
-        f"{env_block}\n\n"
-        f"{file_ops_hint}\n\n"
-        + (f"{project_traverse_hint}\n\n" if project_traverse_hint else "")
-        + (f"{skill_hint}\n\n" if skill_hint else "")
-        + (f"建议执行流：{_runtime_profile.get('flow', _task_category)}\n\n" if (_runtime_profile.get("flow") or _unmatched_task) else "")
-        + f"---\n\n"
-        + f"User task (execute now, no questions): {enriched_task}"
-    )
-    messages_to_send = [first_message]
-    runtime_identity_name = str(_runtime_profile.get("identity", "")).strip()
-    runtime_identity_key = runtime_identity_name.replace("identity_", "") if runtime_identity_name.startswith("identity_") else runtime_identity_name
-    effective_identity = _dispatch_identity or runtime_identity_key
-    agent_id_main = get_agent_id_for_identity(effective_identity) if effective_identity else "default"
-    agent_new_chat = new_chat
-    if agent_id_main != "default":
-        _close_agent_window(agent_id_main)
-        agent_new_chat = True
     runtime = LoopRuntime(task_id, task_text, "default", messages_to_send, agent_new_chat, agent_id_main)
 
-    if skill_hint:
-        print(f"   [skills] Matched history skill injected into prompt")
+    if skill_hint and not continuing_same_task:
+        print("   [skills] Matched history skill injected into prompt")
 
     print(f"\n{'='*60}")
     print(f"Task: {task_text}" + (" (new window)" if new_chat and force_new else ""))
@@ -1844,11 +1976,20 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
     )
 
     print(f"   [flow] Using flow={_flow_name} agent_id={agent_id_main}")
+    close_identity_window = False
+
+    def _finish(result_text: str) -> str:
+        nonlocal close_identity_window
+        close_identity_window = bool(
+            result_text and (_task_done_marker(result_text) or "[File saved to:" in result_text)
+        )
+        return result_text
+
     try:
         if _flow_name == "file_chat_first":
             flow_result = _run_file_chat_first_flow(flow_ctx, task_text, env_info, _loop_policy, agent_id=agent_id_main)
             if flow_result is not None:
-                return flow_result
+                return _finish(flow_result)
         elif _flow_name == "direct_chat":
             flow_result = _run_direct_chat_asset_flow(
                 flow_ctx,
@@ -1859,9 +2000,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
                 agent_id=agent_id_main,
             )
             if flow_result is not None:
-                return flow_result
+                return _finish(flow_result)
         elif _flow_name == "script_then_run":
-            return _run_script_then_run_loop(
+            return _finish(_run_script_then_run_loop(
                 ctx=flow_ctx,
                 task_id=task_id,
                 task_text=task_text,
@@ -1873,9 +2014,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
                 task_category=_task_category,
                 reviewer_prompt=_reviewer_prompt,
                 unmatched_task=_unmatched_task,
-            )
+            ))
         elif _task_category == "write_code":
-            return _run_code_loop(
+            return _finish(_run_code_loop(
                 ctx=flow_ctx,
                 task_id=task_id,
                 task_text=task_text,
@@ -1887,9 +2028,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
                 task_category=_task_category,
                 reviewer_prompt=_reviewer_prompt,
                 unmatched_task=_unmatched_task,
-            )
+            ))
         elif _prompt_style == "direct_delivery":
-            return _run_direct_delivery_loop(
+            return _finish(_run_direct_delivery_loop(
                 ctx=flow_ctx,
                 task_id=task_id,
                 task_text=task_text,
@@ -1899,9 +2040,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
                 agent_id_main=agent_id_main,
                 loop_policy=_loop_policy,
                 reviewer_prompt=_reviewer_prompt,
-            )
+            ))
 
-        return _run_default_loop(
+        return _finish(_run_default_loop(
             ctx=flow_ctx,
             task_id=task_id,
             task_text=task_text,
@@ -1911,9 +2052,9 @@ def run_agent(user_task: str, verbose: bool = True) -> str:
             task_category=_task_category,
             reviewer_prompt=_reviewer_prompt,
             unmatched_task=_unmatched_task,
-        )
+        ))
     finally:
-        if agent_id_main and agent_id_main != "default":
+        if close_on_complete and close_identity_window and agent_id_main and agent_id_main != "default":
             _close_agent_window(agent_id_main)
 
 
@@ -1947,6 +2088,7 @@ def interactive_mode():
     print("Multiline: newline to continue, empty line to submit.")
     print("Ensure AgentPilot is running: npm run api\n")
 
+    continuation = None
     while True:
         task = _read_multiline("Task (empty line to submit)> ")
         if task.lower() in ("quit", "exit", "q"):
@@ -1954,7 +2096,17 @@ def interactive_mode():
             break
         if not task.strip():
             continue
-        run_agent(task)
+        result = run_agent(task, close_on_complete=False, continuation=continuation)
+        current_context = dict(_LAST_RUN_CONTEXT or {})
+        if result and (_task_done_marker(result) or "[File saved to:" in result):
+            if _prompt_task_satisfaction():
+                _close_task_window(current_context.get("agent_id", "default"))
+                continuation = None
+            else:
+                continuation = current_context
+                print("Please provide new instructions for the same task.")
+        else:
+            continuation = None
         print()
 
 

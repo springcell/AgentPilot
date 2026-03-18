@@ -378,12 +378,12 @@ def get_skill_runtime_profile(category: str, skill: dict = None) -> dict:
     }
 
 
-def get_identity_prompt(category: str, task_summary: str = "", language: str = "", skill: dict = None) -> str:
+def get_identity_prompt(category: str, task_summary: str = "", language: str = "", skill: dict = None, runtime_override: dict = None) -> str:
     """
     Load the identity prompt file for the given category and fill in {任务摘要}.
     Returns "" if no identity file exists for this category.
     """
-    runtime = get_skill_runtime_profile(category, skill)
+    runtime = dict(runtime_override) if isinstance(runtime_override, dict) else get_skill_runtime_profile(category, skill)
     identity_name = runtime.get("identity", "")
     if not identity_name:
         return ""
@@ -550,7 +550,9 @@ def _rule_write_doc(task_lower: str, env_info: dict) -> bool:
 
 def _rule_write_code(task_lower: str, env_info: dict) -> bool:
     return bool(re.search(
-        r'\.py\b|python|代码|脚本|修复.*syntax|syntax.*error|indentation|爬虫|写.*函数|写.*类|bug',
+        r'\.(?:py|shader|hlsl|cginc|cs|cpp|cc|cxx|c|h|hpp|hh|js|jsx|ts|tsx|java|go|rs|php|lua|rb|swift|kt)\b'
+        r'|python|shader|hlsl|cginc|compile|compiler|syntax|exception|stack\s*trace'
+        r'|代码|脚本|报错|编译|编译错误|修复.*syntax|syntax.*error|indentation|爬虫|写.*函数|写.*类|bug|error',
         task_lower,
     ))
 

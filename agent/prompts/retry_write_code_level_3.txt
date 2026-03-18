@@ -4,4 +4,4 @@ The ONLY valid responses are:
 1. Exactly one fenced ```json code block containing the next executable instruction, or
 2. Exactly: Cannot complete this task
 
-Do not output bare JSON. Do not explain.
+Do not output bare JSON. Do not explain. Do not ask the user what to try next.

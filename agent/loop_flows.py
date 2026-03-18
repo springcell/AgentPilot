@@ -17,6 +17,11 @@ from loop_common import (
     collect_verify_output as _collect_verify_output,
     execute_with_feedback_override as _execute_with_feedback_override,
     handle_no_block_task_complete as _handle_no_block_task_complete,
+    pick_recent_write_path as _pick_recent_write_path,
+    register_no_progress as _register_no_progress,
+    register_round_signature as _register_round_signature,
+    reset_no_progress as _reset_no_progress,
+    reset_round_signature as _reset_round_signature,
     session_has_write as _session_has_write,
     validate_completion_for_code as _validate_completion_for_code,
 )
@@ -97,6 +102,20 @@ _INTERMEDIATE_REPLY_PATTERNS = [
     r"Analyzing",
     r"Modifying",
 ]
+_RETRYABLE_CHAT_ERROR_PATTERNS = (
+    "send button not found",
+    "reply timeout",
+    "reply polling stalled",
+    "reply polling timed out",
+    "timed out",
+    "time out",
+    "target closed",
+    "execution context was destroyed",
+    "navigation failed",
+    "net::err",
+    "not clickable",
+    "not an element",
+)
 _INTERMEDIATE_PREFIX_RE = _re.compile(r"^[\s\S]{0,20}?ChatGPT\s*[^\n:：]*[:：]\s*", _re.IGNORECASE)
 
 
@@ -113,10 +132,79 @@ def _is_intermediate(text: str) -> bool:
     cleaned = _INTERMEDIATE_PREFIX_RE.sub("", cleaned).strip()
     return any(_re.search(pattern, cleaned, _re.IGNORECASE) for pattern in _INTERMEDIATE_REPLY_PATTERNS)
 
+def _is_retryable_chat_error(error_text: str) -> bool:
+    lowered = str(error_text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(pattern in lowered for pattern in _RETRYABLE_CHAT_ERROR_PATTERNS)
+
 
 def _has_fenced_json_block(text: str) -> bool:
     lowered = str(text or "").lower()
     return '"command"' in lowered and ("```json" in lowered or "```" in lowered)
+
+
+def _build_round_signature(ai_text: str, blocks: list[dict]) -> str:
+    if blocks:
+        slim_blocks = []
+        for block in blocks:
+            slim_blocks.append({
+                "command": block.get("command"),
+                "action": block.get("action"),
+                "path": block.get("path"),
+                "dst": block.get("dst"),
+                "name": block.get("name"),
+            })
+        return "blocks::" + json.dumps(slim_blocks, sort_keys=True, ensure_ascii=False)
+    cleaned = " ".join(str(ai_text or "").split())
+    return "text::" + cleaned[:240]
+
+
+def _build_strategy_reset_feedback(ai_text: str, blocks: list[dict], reset_count: int) -> str:
+    if blocks:
+        summary = json.dumps(
+            [
+                {
+                    "command": block.get("command"),
+                    "action": block.get("action"),
+                    "path": block.get("path") or block.get("dst") or "",
+                }
+                for block in blocks
+            ],
+            ensure_ascii=False,
+        )
+        return (
+            "[STRATEGY RESET] You are repeating the same executable plan and making no progress.\n"
+            "Do not repeat the same command/action/path combination again.\n"
+            "Do not ask the user to choose a method. Choose and execute the next method yourself.\n"
+            "Choose a different method in the next reply.\n"
+            "Examples: if read repeated, move to write/patch; if one tool failed, switch to another tool; "
+            "if validation failed, rewrite the file fully or provide an alternative concrete verification step.\n"
+            f"Repeated plan: {summary}\n"
+            f"Reset count: {reset_count}"
+        )
+    preview = " ".join(str(ai_text or "").split())[:240]
+    return (
+        "[STRATEGY RESET] You are repeating non-executable or non-progress text.\n"
+        "The next reply must take a different path: output a concrete executable JSON instruction, or explicitly say "
+        "'Cannot complete this task' if you are giving up.\n"
+        "Do not ask the user what to try next. If you need to check a file or path, do it yourself with JSON.\n"
+        "Do not repeat the same explanation.\n"
+        f"Repeated text: {preview}\n"
+        f"Reset count: {reset_count}"
+    )
+
+
+_READ_ONLY_FILE_ACTIONS = {"read", "list", "exists", "tree", "find", "history"}
+
+
+def _normalize_path(value: str) -> str:
+    return os.path.normcase(str(value or "").strip().replace("/", "\\"))
+
+
+def _extract_injected_file_content_paths(message: str) -> set[str]:
+    matches = _re.findall(r"## File content:\s*([^\r\n(]+?)\s*\(\d+\s+lines\)", str(message or ""))
+    return {_normalize_path(item) for item in matches if str(item).strip()}
 
 
 def _is_desktop_image_cleanup_task(task_text: str) -> bool:
@@ -195,6 +283,31 @@ def _completed_write_web_response(blocks: list[dict], results: list[dict]) -> st
             f"{result.get('stdout', '').strip()}\n\n"
             f"✅ Task complete: write_web completed successfully"
         ).strip()
+    return ""
+
+
+def _completed_plain_write_response(blocks: list[dict], results: list[dict], verify_extra: str) -> str:
+    """Return a terminal response when a normal text file write succeeds and no verifier exists."""
+    if "[Validation] Skipped:" not in (verify_extra or ""):
+        return ""
+    write_actions = {"write", "write_chunk", "patch", "insert", "append", "delete_lines"}
+    for block, result in zip(blocks, results):
+        if block.get("command") != "file_op" or block.get("action") not in write_actions:
+            continue
+        if not result.get("success"):
+            continue
+        target_path = str(block.get("path") or block.get("dst") or "").strip()
+        stdout = str(result.get("stdout", "")).strip()
+        parts = ["[Execution result feedback]"]
+        if stdout:
+            parts.append(stdout)
+        parts.append(verify_extra.strip())
+        if target_path:
+            parts.append(f"[File saved to: {target_path}]")
+            parts.append(f"✅ Task complete: File updated at {target_path}")
+        else:
+            parts.append("✅ Task complete: File update completed")
+        return "\n".join(part for part in parts if part).strip()
     return ""
 
 
@@ -368,29 +481,53 @@ def _loop_chat_round(ctx: FlowContext, runtime: LoopRuntime, verbose: bool) -> s
     if verbose:
         print(f"[{runtime.iteration}] AI thinking... [{runtime.loop_name}]")
     ctx.io.step_pause(runtime.task_id, f"before_round_{runtime.iteration}_chat")
-    try:
-        ctx.io.write_replay(runtime.task_id, f"round_{runtime.iteration}", "request", runtime.messages_to_send[-1])
-        ai_text = ctx.chat.send(runtime.messages_to_send[-1], new_chat=runtime.new_chat, agent_id=runtime.agent_id_main)
-        ctx.io.write_replay(runtime.task_id, f"round_{runtime.iteration}", "response", ai_text)
-        runtime.new_chat = False
-        return ai_text
-    except RuntimeError as e:
-        err_str = str(e)
-        ctx.io.log_event("ERROR", "chat_error", runtime.task_id, iteration=runtime.iteration, error=err_str, flow=runtime.loop_name)
-        if "Send button not found" in err_str and runtime.iteration < ctx.chat.max_iterations:
-            print(f"\n   [bridge] Send button busy, waiting 8s then retrying...")
-            time.sleep(8)
-            ai_text = ctx.chat.send(runtime.messages_to_send[-1], new_chat=False, agent_id=runtime.agent_id_main)
-            ctx.io.write_replay(runtime.task_id, f"round_{runtime.iteration}", "response_retry", ai_text)
+    request_text = runtime.messages_to_send[-1]
+    request_new_chat = runtime.new_chat
+    max_attempts = 3
+    wait_seconds = 8
+    for attempt in range(1, max_attempts + 1):
+        try:
+            request_slot = "request" if attempt == 1 else f"request_retry_{attempt}"
+            response_slot = "response" if attempt == 1 else f"response_retry_{attempt}"
+            ctx.io.write_replay(runtime.task_id, f"round_{runtime.iteration}", request_slot, request_text)
+            ai_text = ctx.chat.send(request_text, new_chat=request_new_chat, agent_id=runtime.agent_id_main)
+            ctx.io.write_replay(runtime.task_id, f"round_{runtime.iteration}", response_slot, ai_text)
             runtime.new_chat = False
             return ai_text
-        raise
+        except RuntimeError as e:
+            err_str = str(e)
+            retryable = _is_retryable_chat_error(err_str)
+            ctx.io.log_event(
+                "WARN" if retryable and attempt < max_attempts else "ERROR",
+                "chat_error",
+                runtime.task_id,
+                iteration=runtime.iteration,
+                attempt=attempt,
+                retryable=retryable,
+                error=err_str,
+                flow=runtime.loop_name,
+            )
+            if retryable and attempt < max_attempts:
+                print(f"\n   [bridge] transient chat error ({attempt}/{max_attempts}): {err_str}")
+                print(f"   [bridge] waiting {wait_seconds}s then retrying...")
+                time.sleep(wait_seconds)
+                request_new_chat = False
+                continue
+            raise
+    raise RuntimeError("chat round failed without a retry result")
 
 
 def _loop_invalid_reply(ctx: FlowContext, runtime: LoopRuntime, ai_text: str) -> str | None:
     runtime.invalid_reply_count += 1
     if runtime.invalid_reply_count > ctx.chat.max_invalid_reply_retries:
-        return ai_text
+        runtime.strategy_reset_count += 1
+        runtime.invalid_reply_count = 0
+        runtime.messages_to_send.append(
+            ctx.diagnostics.local_diagnose(runtime.task_text, ai_text, collect_env(), ctx.chat.max_invalid_reply_retries)
+            + "\n\n"
+            + _build_strategy_reset_feedback(ai_text, [], runtime.strategy_reset_count)
+        )
+        return None
     runtime.messages_to_send.append(ctx.diagnostics.local_diagnose(runtime.task_text, ai_text, collect_env(), runtime.invalid_reply_count))
     return None
 
@@ -524,8 +661,25 @@ def _begin_loop_round(
 ) -> tuple[str, str, list[dict]]:
     try:
         ai_text = _loop_chat_round(ctx, runtime, verbose)
-    except RuntimeError:
-        return "error", "", []
+    except RuntimeError as e:
+        err_text = str(e).strip()
+        retryable = _is_retryable_chat_error(err_text)
+        if retryable:
+            if err_text == runtime.last_chat_error:
+                runtime.chat_error_count += 1
+            else:
+                runtime.last_chat_error = err_text
+                runtime.chat_error_count = 1
+            retry_budget = max(2, min(4, ctx.chat.max_invalid_reply_retries + 1))
+            if runtime.chat_error_count <= retry_budget:
+                print(f"\n   [bridge] chat round incomplete, retrying loop ({runtime.chat_error_count}/{retry_budget})...")
+                time.sleep(2)
+                return "retry", "", []
+        ctx.io.log_event("ERROR", "chat_round_failed", task_id, iteration=runtime.iteration, error=err_text, flow=flow or runtime.loop_name)
+        return "terminal", f"[Bridge error] {err_text}", []
+
+    runtime.chat_error_count = 0
+    runtime.last_chat_error = ""
 
     if verbose:
         print(f"\n[AI reply]\n{ai_text}\n")
@@ -552,6 +706,21 @@ def _begin_loop_round(
         label=label,
         flow=flow,
     )
+    repeat_count = _register_round_signature(runtime, _build_round_signature(ai_text, blocks))
+    if repeat_count >= 3:
+        runtime.strategy_reset_count += 1
+        feedback = _build_strategy_reset_feedback(ai_text, blocks, runtime.strategy_reset_count)
+        runtime.messages_to_send.append(feedback)
+        ctx.io.log_event(
+            "WARN",
+            "strategy_reset",
+            task_id,
+            iteration=runtime.iteration,
+            repeat_count=repeat_count,
+            reset_count=runtime.strategy_reset_count,
+            flow=flow or runtime.loop_name,
+        )
+        return "retry", "", []
     return "ok", ai_text, blocks
 
 
@@ -572,7 +741,7 @@ def _run_script_then_run_loop(
     runtime = LoopRuntime(task_id, task_text, "script_then_run", messages_to_send, new_chat, agent_id_main)
     runtime.messages_to_send[0] = runtime.messages_to_send[0] + "\n\n" + _build_script_then_run_intro(loop_policy)
 
-    while runtime.iteration < ctx.chat.max_iterations:
+    while True:
         status, ai_text, blocks = _begin_loop_round(
             ctx,
             runtime=runtime,
@@ -599,8 +768,9 @@ def _run_script_then_run_loop(
                 print(f"\nscript_then_run declared task complete")
                 ctx.io.log_event("INFO", "task_complete", task_id, iteration=runtime.iteration, final_reply=ai_text)
                 return ai_text
-            print(f"\nscript_then_run ended without executable blocks")
-            return _format_flow_terminal_feedback(ai_text or "No executable instruction returned.", loop_policy)
+            runtime.strategy_reset_count += 1
+            runtime.messages_to_send.append(_build_strategy_reset_feedback(ai_text, [], runtime.strategy_reset_count))
+            continue
 
         if verbose:
             print(f"[{runtime.iteration}] Executing {len(blocks)} local instruction(s)... [script_then_run]")
@@ -711,7 +881,7 @@ def _run_direct_delivery_loop(
     runtime = LoopRuntime(task_id, task_text, "direct_delivery", messages_to_send, new_chat, agent_id_main)
     runtime.messages_to_send[0] = runtime.messages_to_send[0] + "\n\n" + _build_direct_delivery_intro(loop_policy)
 
-    while runtime.iteration < ctx.chat.max_iterations:
+    while True:
         status, ai_text, blocks = _begin_loop_round(
             ctx,
             runtime=runtime,
@@ -720,6 +890,8 @@ def _run_direct_delivery_loop(
             verbose=verbose,
             label="direct_delivery",
             flow="direct_delivery",
+            allow_cannot_complete=True,
+            cannot_complete_formatter=lambda text: _format_flow_terminal_feedback(text, loop_policy),
         )
         if status == "error":
             return ""
@@ -791,7 +963,7 @@ def _run_code_loop(
     runtime = LoopRuntime(task_id, task_text, "write_code", messages_to_send, new_chat, agent_id_main)
     runtime.messages_to_send[0] = runtime.messages_to_send[0] + "\n\n" + _build_code_loop_intro(loop_policy)
 
-    while runtime.iteration < ctx.chat.max_iterations:
+    while True:
         status, ai_text, blocks = _begin_loop_round(
             ctx,
             runtime=runtime,
@@ -800,7 +972,7 @@ def _run_code_loop(
             verbose=verbose,
             label="write_code",
             flow="write_code",
-            allow_cannot_complete=False,
+            allow_cannot_complete=True,
             cannot_complete_formatter=lambda text: _format_flow_terminal_feedback(text, loop_policy),
         )
         if status == "error":
@@ -808,9 +980,6 @@ def _run_code_loop(
         if status == "terminal":
             return ai_text
         if status == "retry":
-            continue
-        if blocks and not _has_fenced_json_block(ai_text):
-            runtime.messages_to_send.append(ctx.diagnostics.build_code_block_correction())
             continue
 
         if not blocks:
@@ -836,7 +1005,59 @@ def _run_code_loop(
                 followup = _build_nonterminal_validation_followup()
                 runtime.messages_to_send.append(f"{ai_text}\n\n{followup}".strip())
                 continue
-            return ai_text
+            runtime.strategy_reset_count += 1
+            runtime.messages_to_send.append(_build_strategy_reset_feedback(ai_text, [], runtime.strategy_reset_count))
+            continue
+
+        format_warning = ""
+        if blocks and not _has_fenced_json_block(ai_text):
+            format_warning = ctx.diagnostics.build_code_block_correction()
+
+        read_only_round = all(
+            block.get("command") == "file_op" and block.get("action") in _READ_ONLY_FILE_ACTIONS
+            for block in blocks
+        )
+        if read_only_round:
+            injected_paths = _extract_injected_file_content_paths(runtime.messages_to_send[0]) if runtime.messages_to_send else set()
+            round_paths = {
+                _normalize_path(block.get("path", ""))
+                for block in blocks
+                if block.get("command") == "file_op" and block.get("path")
+            }
+            if injected_paths and round_paths and round_paths.issubset(injected_paths):
+                focus_path = next(iter(round_paths), "")
+                followup = (
+                    "[REJECTED] The full file content is already available in the current chat.\n"
+                    "Do NOT read the same file again.\n"
+                    "Your next reply must contain exactly one file_op write/patch instruction that fixes the code."
+                )
+                if focus_path:
+                    escaped = focus_path.replace("\\", "\\\\")
+                    followup += (
+                        "\nUse this target path:\n"
+                        f"```json\n{{\"command\":\"file_op\",\"action\":\"write\",\"path\":\"{escaped}\",\"content\":\"...\"}}\n```"
+                    )
+                runtime.messages_to_send.append(followup)
+                continue
+            read_signature = json.dumps(blocks, sort_keys=True, ensure_ascii=False)
+            repeat_count = _register_no_progress(runtime, f"read_only::{read_signature}")
+            if repeat_count >= 2:
+                focus_path = _pick_recent_write_path(runtime.executed_blocks) or str(blocks[0].get("path", "")).strip()
+                followup = (
+                    "[REJECTED] You already issued the same read-only instruction and it does not move the task forward.\n"
+                    "Do NOT read the same file again.\n"
+                    "Your next reply must contain exactly one file_op write/patch instruction that fixes the code."
+                )
+                if focus_path:
+                    escaped = focus_path.replace("\\", "\\\\")
+                    followup += (
+                        "\nUse this target path:\n"
+                        f"```json\n{{\"command\":\"file_op\",\"action\":\"write\",\"path\":\"{escaped}\",\"content\":\"...\"}}\n```"
+                    )
+                runtime.messages_to_send.append(followup)
+                continue
+        else:
+            _reset_no_progress(runtime)
 
         current_blocks, results, feedback, feedback_override = _execute_blocks_round(
             ctx,
@@ -856,7 +1077,12 @@ def _run_code_loop(
 
         verify_extra = _collect_verify_output(current_blocks, results, verbose=False)
         full_feedback = feedback + verify_extra
+        if format_warning:
+            full_feedback += "\n\n" + format_warning
         runtime.messages_to_send.append(full_feedback)
+        plain_write_done = _completed_plain_write_response(current_blocks, results, verify_extra)
+        if plain_write_done:
+            return _handle_write_web_completion(ctx, task_id, runtime.iteration, plain_write_done)
 
         if "❌" in verify_extra and all(r["success"] for r in results):
             runtime.verify_fail_count += 1
@@ -905,6 +1131,25 @@ def _build_direct_chat_flow_message(identity_line: str, enriched_task: str, task
         + f"User task: {enriched_task or task_text}"
     )
 
+
+def _build_direct_chat_retry_prompt(text_only_rounds: int) -> str:
+    if text_only_rounds >= 6:
+        return (
+            "Continue the same image-generation task in this chat.\n"
+            "Previous rounds returned text only and made no progress.\n"
+            "Do not explain. Do not route. Do not apologize.\n"
+            "Deliver the final downloadable image only, or reply exactly 'Cannot complete this task' if you are giving up."
+        )
+    if text_only_rounds >= 3:
+        return (
+            "Continue the same image-generation task in this chat.\n"
+            "Previous rounds returned text only.\n"
+            "Do not explain. Deliver the final downloadable image only."
+        )
+    return (
+        "Continue the same image-generation task in this chat.\n"
+        "Do not explain. Do not route. Deliver the final downloadable image only."
+    )
 
 def _try_capture_direct_chat_asset(ctx: FlowContext, task_text: str, agent_id: str, reply_text: str = "", fallback_ext: str = ".bin") -> str:
     poll = ctx.file_ops.http_get(f"{ctx.file_ops.poll_url}?agentId={agent_id}")
@@ -1043,12 +1288,12 @@ def _run_direct_chat_asset_flow(ctx: FlowContext, identity_line: str, enriched_t
                                 agent_id: str = "default") -> str | None:
     from file_ops import _call_direct_chat
 
-    max_rounds = min(ctx.chat.max_iterations, 8)
-    flow_deadline = time.time() + min(float(ctx.file_ops.poll_timeout_seconds), 180.0)
     prompt = _build_direct_chat_flow_message(identity_line, enriched_task, task_text)
     text_only_rounds = 0
+    attempt = 0
 
-    for attempt in range(1, max_rounds + 1):
+    while True:
+        attempt += 1
         result = _call_direct_chat(prompt, agent_id=agent_id)
         if not result.get("ok"):
             print(f"   [direct-chat] Direct asset flow failed: {result.get('error')} ? falling back to normal loop")
@@ -1063,7 +1308,7 @@ def _run_direct_chat_asset_flow(ctx: FlowContext, identity_line: str, enriched_t
                 print(f"\nDirect asset flow complete")
                 return _confirm_direct_chat_completion(ctx, agent_id, save_path, (reply_text + suffix).strip())
 
-        round_deadline = min(flow_deadline, time.time() + max(6.0, float(ctx.file_ops.poll_interval_seconds) * 4.0))
+        round_deadline = time.time() + max(6.0, float(ctx.file_ops.poll_interval_seconds) * 4.0)
         captured, latest_text, latest_generating = _wait_for_direct_chat_asset(
             ctx,
             task_text=task_text,
@@ -1094,27 +1339,13 @@ def _run_direct_chat_asset_flow(ctx: FlowContext, identity_line: str, enriched_t
         if reply_text:
             text_only_rounds += 1
             print(f"   [direct-chat] Text-only round {text_only_rounds}, continuing asset loop")
-            prompt = (
-                "Continue the same image-generation task in this chat.\n"
-                "Do not explain. Do not route. Deliver the final downloadable image only."
-            )
+            prompt = _build_direct_chat_retry_prompt(text_only_rounds)
             time.sleep(0.5)
             continue
 
         print("   [direct-chat] Empty reply without asset ? continuing asset loop")
-        prompt = (
-            "Continue the same image-generation task in this chat.\n"
-            "Do not explain. Do not route. Deliver the final downloadable image only."
-        )
+        prompt = _build_direct_chat_retry_prompt(text_only_rounds)
         time.sleep(0.5)
-
-    print("   [direct-chat] Max rounds/timeout reached in asset loop")
-    return _format_flow_terminal_feedback(
-        f"Direct asset flow reached stop conditions without capturing a downloadable image. text_only_rounds={text_only_rounds}.",
-        loop_policy,
-        default_stop="Stop after timeout or max rounds when no local image was captured.",
-        default_fallback="Return the failure reason and the next-step suggestion.",
-    )
 
 
 def _run_default_loop(
@@ -1129,7 +1360,7 @@ def _run_default_loop(
     reviewer_prompt: str,
     unmatched_task: bool,
 ) -> str:
-    while runtime.iteration < ctx.chat.max_iterations:
+    while True:
         status, ai_text, blocks = _begin_loop_round(
             ctx,
             runtime=runtime,
@@ -1137,14 +1368,25 @@ def _run_default_loop(
             task_text=task_text,
             verbose=verbose,
             label="loop",
+            allow_cannot_complete=True,
+            cannot_complete_formatter=lambda text: _format_flow_terminal_feedback(text, loop_policy),
         )
         if status == "error":
             return ""
         if status == "terminal":
-            print(f"\nExceeded max invalid reply attempts, stopping")
+            if ai_text.startswith("[Bridge error]"):
+                print(f"\n{ai_text}")
+                return ai_text
+            if ctx.diagnostics.cannot_complete_marker(ai_text):
+                print(f"\nAI cannot complete this task")
+            else:
+                print(f"\nTerminal stop condition reached")
             return ai_text
         if status == "retry":
-            print(f"   [diagnose] {runtime.messages_to_send[-1][:120].replace(chr(10), ' ')}...")
+            if runtime.invalid_reply_count > 0 and runtime.messages_to_send:
+                print(f"   [diagnose] {runtime.messages_to_send[-1][:120].replace(chr(10), ' ')}...")
+            else:
+                print(f"   [bridge] retrying current round...")
             continue
 
         if not blocks:
@@ -1169,8 +1411,9 @@ def _run_default_loop(
                 preview = ai_text[:200] + ("..." if len(ai_text) > 200 else "")
                 print(f"\nNo exec instruction (received {len(ai_text)} chars)")
                 print(f"   Preview: {preview!r}")
-            print(f"\nAgent done (no more instructions)")
-            return ai_text
+            runtime.strategy_reset_count += 1
+            runtime.messages_to_send.append(_build_strategy_reset_feedback(ai_text, [], runtime.strategy_reset_count))
+            continue
 
         if verbose:
             print(f"[{runtime.iteration}] Executing {len(blocks)} local instruction(s)...")

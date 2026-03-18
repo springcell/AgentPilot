@@ -1,0 +1,29 @@
+{
+  "name": "fix_test_shader",
+  "category": "write_code",
+  "flow": "default",
+  "description": "fix test.shader",
+  "patterns": [
+    "test_shader",
+    "test",
+    "shader",
+    "fix"
+  ],
+  "rules": [],
+  "steps": [
+    {
+      "command": "file_op",
+      "action": "write",
+      "path": "D:/tmp/test.shader",
+      "content": "shader body"
+    },
+    {
+      "command": "file_op",
+      "action": "read",
+      "path": "D:/tmp/test.shader"
+    }
+  ],
+  "notes": "",
+  "success_count": 1,
+  "last_used": "2026-03-17 23:44"
+}

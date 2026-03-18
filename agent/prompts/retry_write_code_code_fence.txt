@@ -1,3 +1,6 @@
 Your last programming reply contained executable JSON, but it was not wrapped in a fenced code block.
 For write_code tasks, bare JSON is not accepted.
-Re-output the same instruction now as exactly one fenced ```json code block and nothing else.
+Do not ask the user what to do next.
+The previous instruction was already executed.
+Do NOT repeat any instruction that has already executed.
+From the next step onward, output exactly one fenced ```json code block and continue from the current state.

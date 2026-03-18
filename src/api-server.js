@@ -709,6 +709,7 @@ const server = http.createServer(async (req, res) => {
       const hasImage = !!(result?.downloaded_b64);
       const intermediate = !isTaskDone && !hasImage && (_isIntermediate(text) || result?.generating === true);
       _replyCache[agentId] = { text, generating: intermediate, updatedAt: Date.now(),
+        ...(result?.stalled ? { stalled: true } : {}),
         ...(result?.downloaded_b64 ? { downloaded_b64: result.downloaded_b64, downloaded_ext: result.downloaded_ext ?? '.bin' } : {}) };
       if (intermediate) {
         console.warn(`  [poll] agentId=${agentId} intermediate (len=${text.length}), keeping generating:true`);
@@ -925,7 +926,10 @@ async function _pollDomUntilFinal(agentId, maxMs = 600_000) {
 
   let pollCount = 0;
   let lastLoggedText = '';
+  let lastObservedText = '';
+  let lastObservedAt = Date.now();
   const LOG_EVERY_N = 10; // log at most every N polls to avoid spam when reply is unchanged
+  const DOM_STALL_MS = 20000;
 
   try {
     while (Date.now() < deadline) {
@@ -955,6 +959,11 @@ async function _pollDomUntilFinal(agentId, maxMs = 600_000) {
       const stillGenerating = await page.evaluate(() =>
         !!document.querySelector('[data-testid="stop-button"]')
       ).catch(() => false);
+
+      if (text !== lastObservedText) {
+        lastObservedText = text;
+        lastObservedAt = Date.now();
+      }
 
       const shouldLog = (pollCount % LOG_EVERY_N === 0) || (text !== lastLoggedText);
       if (shouldLog) {
@@ -998,6 +1007,11 @@ async function _pollDomUntilFinal(agentId, maxMs = 600_000) {
         _replyCache[agentId] = { text, generating: false, updatedAt: Date.now(),
           ...(downloaded_b64 ? { downloaded_b64 } : {}) };
         console.log(`  [DOM poll] agentId=${agentId} got final reply len=${text.length}`);
+        return;
+      }
+      if (!stillGenerating && _isIntermediate(text) && (Date.now() - lastObservedAt) >= DOM_STALL_MS) {
+        _replyCache[agentId] = { text, generating: false, stalled: true, updatedAt: Date.now() };
+        console.warn(`  [DOM poll] agentId=${agentId} stalled on intermediate text, marking stalled`);
         return;
       }
       if (_replyCache[agentId]) {

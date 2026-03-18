@@ -9,6 +9,8 @@ Your ONLY valid options are:
 1. Output a valid JSON instruction RIGHT NOW (read the file, write to it, run a command — anything).
 2. Output exactly: Cannot complete this task
 
+Do NOT ask the user what to try next. If file existence is relevant, check it yourself with JSON.
+
 Minimal working example to read the file:
 {"command":"file_op","action":"read","path":"<exact path from diagnosis>"}
 

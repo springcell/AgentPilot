@@ -304,16 +304,18 @@ async function doChat(message, options = {}) {
 
   const browser = await getBrowser(cdpUrl);
   let page = agentPages[agentId];
+  let createdFreshPage = false;
 
   if (agentId !== 'default') {
     if (!page || !(await isPageAlive(page))) {
       page = await browser.newPage();
+      createdFreshPage = true;
       const cached = loadAuth();
       if (cached?.cookies?.length) {
         await page.setCookie(...cached.cookies);
         if (cached.userAgent) await page.setUserAgent(cached.userAgent);
       }
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
       agentPages[agentId] = page;
     } else {
       await page.bringToFront();
@@ -323,24 +325,24 @@ async function doChat(message, options = {}) {
     page = pages.find(p => p.url().includes('chatgpt.com'));
     if (!page) {
       page = await browser.newPage();
+      createdFreshPage = true;
       const cached = loadAuth();
       if (cached?.cookies?.length) {
         await page.setCookie(...cached.cookies);
         if (cached.userAgent) await page.setUserAgent(cached.userAgent);
       }
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
     } else {
       await page.bringToFront();
     }
   }
 
-  if (newChat) {
-    const newChatBtn = await findFirst(page, ['button[aria-label*="New chat"]', 'a[href="/"]', '[data-testid="new-chat-button"]']);
+  if (newChat && !createdFreshPage) {
+    const newChatBtn = await findFirstVisible(page, ['button[aria-label*="New chat"]', '[data-testid="new-chat-button"]']);
     if (newChatBtn) {
-      await page.click(newChatBtn);
-      await new Promise(r => setTimeout(r, 2000));
+      await safeClickSelector(page, newChatBtn, { timeout: 3000 });
     } else {
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
     }
   }
 
@@ -356,11 +358,11 @@ async function doChat(message, options = {}) {
   }
 
   const waitOpts = { timeout: pageReadyTimeoutMs };
-
-  const inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
+  let inputSelector = await waitForSelector(page, SELECTORS.input, { timeout: 1200, interval: 150 });
+  if (!inputSelector) {
+    inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
+  }
   if (!inputSelector) throw new Error('Input box not found, ensure you are on chatgpt.com');
-
-  await page.click(inputSelector);
 
   const filled = await page.evaluate((sel, text) => {
     const el = document.querySelector(sel);
@@ -491,7 +493,8 @@ async function doChat(message, options = {}) {
     });
   }
 
-  await page.click(sendSelector);
+  const clickableSendSelector = await findFirstVisible(page, SELECTORS.sendButtonClickable || []);
+  await safeClickSelector(page, clickableSendSelector || sendSelector, { timeout: SEND_READY_TIMEOUT });
 
   const _INTER_RE = [
     /正在搜索/, /正在思考/, /正在浏览/, /正在查找/,
@@ -509,9 +512,11 @@ async function doChat(message, options = {}) {
 
   const start = Date.now();
   let lastText = '';
+  let lastProgressAt = Date.now();
   let stableCount = 0;
   const STABLE_POLLS = 4;
   const MIN_LEN_FOR_QUICK_STABLE = 150;
+  const INTERMEDIATE_STALL_MS = 15000;
 
   while (Date.now() - start < pollTimeoutMs) {
     await new Promise(r => setTimeout(r, pollIntervalMs));
@@ -538,6 +543,10 @@ async function doChat(message, options = {}) {
         : STABLE_POLLS;
       if (stableCount >= requiredStable) {
         if (_isIntermediate(text)) {
+          if (Date.now() - lastProgressAt >= INTERMEDIATE_STALL_MS) {
+            await cdpSession?.detach().catch(() => {});
+            return { text, raw: text, generating: true, stalled: true };
+          }
           stableCount = 0;
           continue;
         }
@@ -579,6 +588,7 @@ async function doChat(message, options = {}) {
       }
     } else {
       lastText = text;
+      lastProgressAt = Date.now();
       stableCount = 0;
     }
   }
@@ -616,6 +626,71 @@ async function waitForSelector(page, selectors, options = {}) {
     await new Promise(r => setTimeout(r, interval));
   }
   return null;
+}
+
+async function isSelectorVisible(page, selector) {
+  try {
+    return await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!(el instanceof Element)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && style.pointerEvents !== 'none'
+        && rect.width > 0
+        && rect.height > 0;
+    }, selector);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function findFirstVisible(page, selectors) {
+  for (const sel of selectors) {
+    if (await isSelectorVisible(page, sel)) return sel;
+  }
+  return null;
+}
+
+async function safeClickSelector(page, selector, options = {}) {
+  const timeout = options.timeout ?? 5000;
+  if (!selector) return false;
+  try {
+    await page.waitForSelector(selector, { visible: true, timeout });
+    await page.click(selector, { timeout });
+    return true;
+  } catch (firstErr) {
+    try {
+      const clicked = await page.evaluate((sel) => {
+        const candidates = Array.from(document.querySelectorAll(sel));
+        const el = candidates.find((node) => {
+          if (!(node instanceof Element)) return false;
+          const style = window.getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && style.pointerEvents !== 'none'
+            && rect.width > 0
+            && rect.height > 0;
+        });
+        if (!(el instanceof HTMLElement)) return false;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        el.click();
+        return true;
+      }, selector);
+      if (clicked) return true;
+    } catch (_) {}
+    throw firstErr;
+  }
+}
+
+async function gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs) {
+  await page.goto(chatgptUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  return await waitForSelector(page, SELECTORS.input, {
+    timeout: pageReadyTimeoutMs,
+    interval: 200,
+  });
 }
 
 async function waitForSendButtonEnabled(page, selector, timeout = 60000) {
@@ -729,16 +804,18 @@ async function doChatWithFile(filePath, message, options = {}) {
 
   const browser = await getBrowser(cdpUrl);
   let page = agentPages[agentId];
+  let createdFreshPage = false;
 
   if (agentId !== 'default') {
     if (!page || !(await isPageAlive(page))) {
       page = await browser.newPage();
+      createdFreshPage = true;
       const cached = loadAuth();
       if (cached?.cookies?.length) {
         await page.setCookie(...cached.cookies);
         if (cached.userAgent) await page.setUserAgent(cached.userAgent);
       }
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
       agentPages[agentId] = page;
     } else {
       await page.bringToFront();
@@ -748,24 +825,24 @@ async function doChatWithFile(filePath, message, options = {}) {
     page = pages.find(p => p.url().includes('chatgpt.com'));
     if (!page) {
       page = await browser.newPage();
+      createdFreshPage = true;
       const cached = loadAuth();
       if (cached?.cookies?.length) {
         await page.setCookie(...cached.cookies);
         if (cached.userAgent) await page.setUserAgent(cached.userAgent);
       }
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
     } else {
       await page.bringToFront();
     }
   }
 
-  if (newChat) {
-    const newChatBtn = await findFirst(page, ['button[aria-label*="New chat"]', 'a[href="/"]', '[data-testid="new-chat-button"]']);
+  if (newChat && !createdFreshPage) {
+    const newChatBtn = await findFirstVisible(page, ['button[aria-label*="New chat"]', '[data-testid="new-chat-button"]']);
     if (newChatBtn) {
-      await page.click(newChatBtn);
-      await new Promise(r => setTimeout(r, 2000));
+      await safeClickSelector(page, newChatBtn, { timeout: 3000 });
     } else {
-      await page.goto(chatgptUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      await gotoUntilInputReady(page, chatgptUrl, pageReadyTimeoutMs);
     }
   }
 
@@ -777,7 +854,10 @@ async function doChatWithFile(filePath, message, options = {}) {
 
   // -- Wait for page ready --
   const waitOpts = { timeout: pageReadyTimeoutMs };
-  const inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
+  let inputSelector = await waitForSelector(page, SELECTORS.input, { timeout: 1200, interval: 150 });
+  if (!inputSelector) {
+    inputSelector = await waitForSelector(page, SELECTORS.input, waitOpts);
+  }
   if (!inputSelector) throw new Error('Input box not found, ensure you are on chatgpt.com');
 
   // -- Click the attach/upload button to reveal file input --
@@ -801,9 +881,9 @@ async function doChatWithFile(filePath, message, options = {}) {
   // Strategy A: click the attach button first, then setInputFiles
   let fileInputHandle = null;
 
-  const attachBtn = await findFirst(page, ATTACH_BTNS);
+  const attachBtn = await findFirstVisible(page, ATTACH_BTNS);
   if (attachBtn) {
-    await page.click(attachBtn);
+    await safeClickSelector(page, attachBtn, { timeout: 3000 });
     await new Promise(r => setTimeout(r, 600));
   }
 
@@ -858,7 +938,7 @@ async function doChatWithFile(filePath, message, options = {}) {
 
   // -- Type message (if any) --
   if (message) {
-    await page.click(inputSelector);
+    await safeClickSelector(page, inputSelector, { timeout: 3000 });
     const filled = await page.evaluate((sel, text) => {
       const el = document.querySelector(sel);
       if (!el) return false;
@@ -977,7 +1057,8 @@ async function doChatWithFile(filePath, message, options = {}) {
   }
   // ── End download interception ──────────────────────────────────────────────
 
-  await page.click(sendSelector);
+  const clickableSendSelector = await findFirstVisible(page, SELECTORS.sendButtonClickable || []);
+  await safeClickSelector(page, clickableSendSelector || sendSelector, { timeout: 60000 });
 
   // -- Poll for reply --
   const _INTER_RE = [
