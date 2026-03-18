@@ -84,4 +84,4 @@ The CDP connection to Chrome is gone. Run `npm run chrome` (or `npm run run`) ag
 
 MIT
 
-Docs updated on 2026-03-17: improved direct-chat image handling, file-chat upload retry, and logging around polling.
+Latest: README usage examples, write_code code-block retries, and validation-loop improvements (validation failures no longer end the loop).
